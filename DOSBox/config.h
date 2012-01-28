@@ -71,7 +71,7 @@ This means that this file has had too many modifications to be safely replaceabl
 /* Define to 1 to use a x86 assembly fpu core */
 //--Modified 2009-02-26 by Alun Bestor to force this on for Intel
 
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__)
 	#define C_FPU_X86 1
 #endif
 

@@ -25,7 +25,7 @@ NSString * const BXDriveBundleErrorDomain = @"BXDriveBundleErrorDomain";
 
 @implementation BXDriveBundleImport
 @synthesize drive = _drive;
-@synthesize copyFiles = _copyFiles;
+// @synthesize copyFiles = _copyFiles;
 @synthesize destinationFolder = _destinationFolder;
 @synthesize importedDrivePath = _importedDrivePath;
 
