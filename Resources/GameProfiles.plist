@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>BXGameProfileCatalogueVersion</key>
-	<string>20120128.1</string>
+	<string>20120211.1</string>
 	<key>BXSpecificGameProfiles</key>
 	<array>
 		<dict>
@@ -911,6 +911,23 @@
 	<array>
 		<dict>
 			<key>BXProfileIdentifier</key>
+			<string>net.washboardabs.no-temp-drive-games</string>
+			<key>BXProfileDescription</key>
+			<string>Games which are incompatible with the temp drive.</string>
+			<key>BXProfileMatches</key>
+			<array>
+				<string>3 Sisters’ Story</string>
+				<string>Season of Sakura</string>
+			</array>
+			<key>BXProfileTelltales</key>
+			<array>
+				<string>pmdibm.com</string>
+			</array>
+			<key>BXMountTempDrive</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>BXProfileIdentifier</key>
 			<string>net.washboardabs.cdrom-protected-games</string>
 			<key>BXProfileDescription</key>
 			<string>Games which require any CD to be present.</string>
@@ -1009,7 +1026,7 @@
 				<string>Martian Memorandum</string>
 				<string>Rampart</string>
 				<string>The Settlers</string>
-				<string>Battle Chess II</string>
+				<string>Battle Chess II: Chinese Chess</string>
 				<string>A-Train</string>
 				<string>SimLife</string>
 				<string>SimAnt</string>
@@ -1099,6 +1116,7 @@
 				<string>rampart.exe</string>
 				<string>sett.exe</string>
 				<string>chess2.exe</string>
+				<string>chessii.exe</string>
 				<string>at.ovl</string>
 				<string>sml.exe</string>
 				<string>simant.exe</string>

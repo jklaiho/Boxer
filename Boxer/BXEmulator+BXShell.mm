@@ -13,6 +13,8 @@
 #import "BXEmulatedMT32.h"
 
 #import "shell.h"
+#import "regs.h"
+#import "callback.h"
 
 
 //Lookup table of BXEmulator+BXShell selectors and the shell commands that call them
@@ -55,32 +57,37 @@ nil];
 #pragma mark -
 #pragma mark Command processing
 
-- (void) executeCommand: (NSString *)theString
+- (void) executeCommand: (NSString *)command
 			   encoding: (NSStringEncoding)encoding
 {
 	if ([self isExecuting])
 	{
-		DOS_Shell *shell = [self _currentShell];
-		char *encodedString;
-
-		if ([self isRunningProcess])
-		{
-			//If we're running a program or we just don't want to print anything,
-			//then run the command itself and eat the command's output.
-			theString = [theString stringByAppendingString: @" > NUL"];
-			encodedString = (char *)[theString cStringUsingEncoding: encoding];
-			if (encodedString) shell->ParseLine(encodedString);
+        NSAssert2([command lengthOfBytesUsingEncoding: encoding] < CMD_MAXLINE,
+                  @"Command exceeded maximum commandline length of %u: %@", CMD_MAXLINE, command);
+        
+        //If we're inside a batchfile, we can go ahead and run the command directly.
+		if ([self isInBatchScript])
+		{   
+            char encodedCommand[CMD_MAXLINE];
+            
+			BOOL encoded = [command getCString: encodedCommand
+                                     maxLength: CMD_MAXLINE
+                                      encoding: encoding];
+			if (encoded)
+            {
+                DOS_Shell *shell = [self _currentShell];
+                shell->ParseLine(encodedCommand);
+            }
+            else
+            {
+                NSAssert1(NO, @"Could not encode command: %@", command);
+            }
 		}
-		else if ([self isInBatchScript])
-		{
-			//If we're inside a batchfile, we can go ahead and run the command directly.
-			encodedString = (char *)[theString cStringUsingEncoding: encoding];
-			if (encodedString) shell->ParseLine(encodedString);
-		}
+        //Otherwise, add the line to the end of the queue and we'll process it 
+        //when we're next at the commandline.
 		else
 		{
-			//Otherwise we're at the commandline: feed our command into DOSBox's command-line input loop
-			[[self commandQueue] addObject: [theString stringByAppendingString: @"\n"]];
+			[[self commandQueue] addObject: [command stringByAppendingString: @"\n"]];
 		}
 	}
 }
@@ -98,8 +105,11 @@ nil];
 {
 	if (changeDir)
 	{
-		NSString *parentFolder	= [[dosPath stringByDeletingLastPathComponent] stringByAppendingString: @"/"];
-		NSString *programName	= [dosPath lastPathComponent];
+        //Normalise the path to Unix format so that we can perform standard Cocoa path operations upon it.
+        //TODO: write an NSString category with DOS path-handling routines for this kind of thing.
+        NSString *cocoafiedDOSPath = [dosPath stringByReplacingOccurrencesOfString: @"\\" withString: @"/"];
+		NSString *parentFolder	= [[cocoafiedDOSPath stringByDeletingLastPathComponent] stringByAppendingString: @"/"];
+		NSString *programName	= [cocoafiedDOSPath lastPathComponent];
 		
 		[self changeWorkingDirectoryToPath: parentFolder];
 		[self executeCommand: programName encoding: BXDirectStringEncoding];
@@ -140,6 +150,7 @@ nil];
 {
 	BOOL changedPath = NO;
 
+    //Normalise the path to ensure all delimiters are DOS-style rather than Unix-style. 
 	dosPath = [dosPath stringByReplacingOccurrencesOfString: @"/" withString: @"\\"];
 	
 	//If the path starts with a drive letter, switch to that first
@@ -165,6 +176,7 @@ nil];
         [self didChangeValueForKey: @"pathOfCurrentDirectory"];
 	}
 	
+    //DOCUMENT ME: why were we discarding any commands that were already typed?
 	if (changedPath) [self discardShellInput];
 	
 	return changedPath;
@@ -210,8 +222,8 @@ nil];
 	if ([self isAtPrompt])
 	{
 		NSString *emptyInput = @"\n";
-		if (![[[self commandQueue] lastObject] isEqualToString: emptyInput]) [[self commandQueue] addObject: emptyInput];
-		
+		if (![[[self commandQueue] lastObject] isEqualToString: emptyInput])
+            [[self commandQueue] addObject: emptyInput];
 	}
 }
 
@@ -219,7 +231,7 @@ nil];
 #pragma mark -
 #pragma mark Actual shell commands you might want to call
 
-- (id) displayStringFromKey: (NSString *)argumentString
+- (void) displayStringFromKey: (NSString *)argumentString
 {
 	//We may need to do additional cleanup and string-splitting here in future
 	NSString *theKey = argumentString;
@@ -229,38 +241,34 @@ nil];
 							value: nil
 							table: @"Shell"];
 	[self displayString: theString];
-
-	return [NSNumber numberWithBool: YES];
 }
 
-- (id) showShellCommandHelp: (NSString *)argumentString
+- (void) showShellCommandHelp: (NSString *)argumentString
 {
 	[self _substituteCommand: @"cls" encoding: BXDirectStringEncoding];
-	[self displayStringFromKey: @"Shell Command Help"];
-
-	return [NSNumber numberWithBool: YES];
+	[self displayString: NSLocalizedStringFromTable(@"Shell Command Help", @"Shell",
+                                                    @"A list of common DOS commands, displayed when running HELP at the command line. This should list the commands in the left column (which should be left untranslated) and command descriptions in the right-hand column. Accepts DOSBox-style formatting characters.")];
 }
 
-- (id) runPreflightCommands: (NSString *)argumentString
+- (void) runPreflightCommands: (NSString *)argumentString
 {
 	[[self delegate] runPreflightCommandsForEmulator: self];
-	return [NSNumber numberWithBool: YES];
 }
 
-- (id) runLaunchCommands: (NSString *)argumentString
+- (void) runLaunchCommands: (NSString *)argumentString
 {
 	[[self delegate] runLaunchCommandsForEmulator: self];
-	return [NSNumber numberWithBool: YES];
 }
 
-- (id) listDrives: (NSString *)argumentString
+- (void) listDrives: (NSString *)argumentString
 {
 	NSString *description;
 	BXDisplayPathTransformer *pathTransformer = [[BXDisplayPathTransformer alloc] initWithJoiner: @"/"
 																						ellipsis: @"..."
 																				   maxComponents: 4];
 	
-	[self displayStringFromKey: @"Currently mounted drives:"];
+	[self displayString: NSLocalizedStringFromTable(@"Currently mounted drives:", @"Shell",
+                                           @"Heading for drive list when drunning DRIVES command.")];
 	NSArray *sortedDrives = [[self mountedDrives] sortedArrayUsingSelector: @selector(letterCompare:)];
 	for (BXDrive *drive in sortedDrives)
 	{
@@ -293,45 +301,85 @@ nil];
 		[self displayString: description];
 	}
 	[pathTransformer release];
-	
-	return [NSNumber numberWithBool: YES];
 }
 
-- (id) sayToMT32: (NSString *)argumentString
+- (void) sayToMT32: (NSString *)argumentString
 {
     //Strip surrounding quotes from the message
     NSString *cleanedString = [argumentString stringByTrimmingCharactersInSet: [NSCharacterSet characterSetWithCharactersInString: @"\""]];
     
     [self sendMT32LCDMessage: cleanedString];
-    return [NSNumber numberWithBool: YES];
 }
 
-- (id) revealPath: (NSString *)argumentString
+- (void) revealPath: (NSString *)argumentString
 {
 	NSString *cleanedPath = [argumentString stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]];
 	if (![cleanedPath length]) cleanedPath = @".";
+    
+    //Firstly, get a fully-resolved absolute path from any relative path.
+    NSString *resolvedPath = [self resolvedDOSPath: cleanedPath];
+    
+    //Path did not exist in DOS, so we cannot continue.
+    if (!resolvedPath)
+    {
+        NSString *errorFormat = NSLocalizedStringFromTable(@"The path \"%1$@\" does not exist.",
+                                                           @"Shell",
+                                                           @"Error message displayed when the REVEAL command is called on a path that could not be resolved to a full DOS path. %1$@ is the path exactly as the user entered it on the commandline.");
+        
+        [self displayString: [NSString stringWithFormat: errorFormat, cleanedPath, nil]];
+        return;
+    }
+    
 	
-	NSString *filesystemPath = [self pathForDOSPath: cleanedPath];
-	
-	BOOL couldReveal = NO;
-	if (filesystemPath)
-	{
-		BXAppController *appController = [NSApp delegate];
-		couldReveal = [appController revealPath: filesystemPath];
-	}
-	
-	if (!couldReveal)
-	{
-		NSString *errorFormat = NSLocalizedStringFromTable(@"The path \"%1$@\" could not be found, or does not exist in the OS X filesystem.",
-														   @"Shell",
-														   @"Error message displayed when BOXER_REVEAL cannot resolve a specified drive path.");
-		NSString *errorMessage = [NSString stringWithFormat: errorFormat, cleanedPath, nil];
-		[self displayString: errorMessage];
-	}
-	
-	return [NSNumber numberWithBool: YES];
+    //Now, look up where the path lies in the OS X filesystem.
+	NSString *OSXPath = [self pathForDOSPath: cleanedPath];
+    
+    //Path does not exist in OS X, so we cannot continue.
+	if (!OSXPath)
+    {
+        BXDrive *drive = [self driveForDOSPath: cleanedPath];
+        
+        NSString *errorFormat;
+        if ([drive isInternal])
+        {
+            errorFormat = NSLocalizedStringFromTable(@"The path \"%1$@\" is a virtual drive used by Boxer and does not exist in OS X.",
+                                                               @"Shell",
+                                                               @"Error message displayed when the REVEAL command is called on an internal virtual drive. %1$@ is the absolute DOS path to that drive, including drive letter.");
+        }
+        else
+        {
+            errorFormat = NSLocalizedStringFromTable(@"The path \"%1$@\" is not accessible in OS X.",
+                                                               @"Shell",
+                                                               @"Error message displayed when the REVEAL command cannot resolve a DOS path to an OS X filesystem path. %1$@ is the absolute DOS path, including drive letter.");
+        }
+		[self displayString: [NSString stringWithFormat: errorFormat, resolvedPath, nil]];
+        return;
+    }
+    
+    //If we got this far, we finally have a path we can reveal in OS X.
+    //FIXME: we should never be talking directly to the app controller from this level.
+    //Instead, pass this responsibility up to our delegate.
+	BXAppController *appController = [NSApp delegate];
+    BOOL revealed = [appController revealPath: OSXPath];
+    
+    //The file did not exist in OS X so could not be revealed.
+    if (!revealed)
+    {
+        NSString *errorFormat = NSLocalizedStringFromTable(@"The path \"%1$@\" does not exist in OS X.",
+                                                           @"Shell",
+                                                           @"Error message displayed when the REVEAL command cannot reveal a path in OS X because it did not exist. %1$@ is the absolute DOS path, including drive letter.");
+        
+		[self displayString: [NSString stringWithFormat: errorFormat, resolvedPath, nil]];
+        return;
+    }
 }
 
+- (void) clearScreen
+{
+    //Copypasta from CMD_CLS.
+	reg_ax=0x0003;
+	CALLBACK_RunRealInt(0x10);
+}
 @end
 
 
@@ -376,7 +424,8 @@ nil];
 			//If we respond to that selector, then handle it ourselves
 			if ([self respondsToSelector: selector])
 			{
-				returnValue = [[self performSelector: selector withObject: argumentString] boolValue];
+				[self performSelector: selector withObject: argumentString];
+                returnValue = YES;
 			}
 			//Otherwise, pass the selector up to the application as an action call, using the argument string as the action parameter
 			//This allows other parts of Boxer to hook into the shell, without BXShell explicitly handling the method responsible
@@ -392,15 +441,20 @@ nil];
 }
 
 
-- (void) _substituteCommand: (NSString *)theString encoding: (NSStringEncoding)encoding
+- (void) _substituteCommand: (NSString *)command encoding: (NSStringEncoding)encoding
 {
 	if ([self isExecuting])
 	{
-		const char *encodedString = [theString cStringUsingEncoding: encoding];
-		if (encodedString)
+        NSAssert2([command lengthOfBytesUsingEncoding: encoding] < CMD_MAXLINE,
+                  @"Command exceeded maximum commandline length of %u: %@", CMD_MAXLINE, command);
+        
+        char cmd[CMD_MAXLINE];
+        BOOL encoded = [command getCString: cmd maxLength: CMD_MAXLINE encoding: encoding];
+        
+		if (encoded)
 		{
 			DOS_Shell *shell = [self _currentShell];
-			shell->DoCommand((char *)encodedString);	
+			shell->DoCommand(cmd);
 		}
 	}
 }

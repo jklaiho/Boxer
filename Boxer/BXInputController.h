@@ -27,6 +27,7 @@
 {
 	BXCursorFadeAnimation *cursorFade;
 	
+    BOOL simulatedNumpadActive;
 	BOOL mouseActive;
 	BOOL mouseLocked;
 	BOOL trackMouseWhileUnlocked;
@@ -40,9 +41,15 @@
 	//Used internally for tracking mouse state between events
 	NSPoint distanceWarped;
 	BOOL updatingMousePosition;
-	BXMouseButtonMask simulatedMouseButtons;
 	NSTimeInterval threeFingerTapStarted;
-	
+    
+	BXMouseButtonMask simulatedMouseButtons;
+    
+    //Which OSX virtual keycodes were pressed with a modifier, causing
+    //them to send a different key than usual. Used for releasing
+    //simulated keys upon key-up.
+    BOOL modifiedKeys[BXMaxSystemKeyCode];
+    
 	NSUInteger lastModifiers;
 	
 	NSMutableDictionary *controllerProfiles;
@@ -74,6 +81,9 @@
 //Whether the mouse is currently within our view.
 @property (readonly, nonatomic) BOOL mouseInView;
 
+//Whether numpad simulation is turned on. When active, certain keys will be remapped to imitate
+//the numeric keypad on a fullsize PC keyboard.
+@property (assign, nonatomic) BOOL simulatedNumpadActive;
 
 #pragma mark -
 #pragma mark Methods
@@ -102,11 +112,13 @@
 #pragma mark -
 #pragma mark UI actions
 
-//Lock/unlock the mouse.
+//Lock/unlock the mouse. Only available while a program is running.
 - (IBAction) toggleMouseLocked: (id)sender;
 
 //Enable/disable unlocked mouse tracking.
 - (IBAction) toggleTrackMouseWhileUnlocked: (id)sender;
 
+//Enable/disable the simulated numpad layout. Only available while a program is running.
+- (IBAction) toggleSimulatedNumpad: (id)sender;
 
 @end

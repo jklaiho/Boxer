@@ -38,18 +38,22 @@ enum {
 @class BXPackage;
 @interface BXBezelController : NSWindowController
 {
-    IBOutlet NSView *driveAddedBezel;
-    IBOutlet NSView *driveSwappedBezel;
-    IBOutlet NSView *driveRemovedBezel;
-    IBOutlet NSView *driveImportedBezel;
-    IBOutlet NSView *fullscreenBezel;
-    IBOutlet NSView *joystickIgnoredBezel;
-    IBOutlet NSView *CPUSpeedBezel;
-    IBOutlet NSView *throttleBezel;
-    IBOutlet NSView *pauseBezel;
-    IBOutlet NSView *playBezel;
-    IBOutlet NSView *MT32MessageBezel;
-    IBOutlet NSView *MT32MissingBezel;
+    NSView *driveAddedBezel;
+    NSView *driveSwappedBezel;
+    NSView *driveRemovedBezel;
+    NSView *driveImportedBezel;
+    NSView *fullscreenBezel;
+    NSView *joystickIgnoredBezel;
+    NSView *CPUSpeedBezel;
+    NSView *throttleBezel;
+    NSView *pauseBezel;
+    NSView *playBezel;
+    NSView *MT32MessageBezel;
+    NSView *MT32MissingBezel;
+    NSView *numpadActiveBezel;
+    NSView *numpadInactiveBezel;
+    NSView *numlockActiveBezel;
+    NSView *numlockInactiveBezel;
     
     BXBezelPriority currentPriority;
 }
@@ -58,32 +62,39 @@ enum {
 #pragma mark Properties
 
 //The bezel view used for drive inserted/ejected/imported notifications.
-@property (retain, nonatomic) NSView *driveAddedBezel;
-@property (retain, nonatomic) NSView *driveSwappedBezel;
-@property (retain, nonatomic) NSView *driveRemovedBezel;
-@property (retain, nonatomic) NSView *driveImportedBezel;
+@property (retain, nonatomic) IBOutlet NSView *driveAddedBezel;
+@property (retain, nonatomic) IBOutlet NSView *driveSwappedBezel;
+@property (retain, nonatomic) IBOutlet NSView *driveRemovedBezel;
+@property (retain, nonatomic) IBOutlet NSView *driveImportedBezel;
 
 //The bezel used for fullscreen toggle notifications.
-@property (retain, nonatomic) NSView *fullscreenBezel;
+@property (retain, nonatomic) IBOutlet NSView *fullscreenBezel;
 
 //The bezel used for notifying the user that the joystick is being ignored.
-@property (retain, nonatomic) NSView *joystickIgnoredBezel;
+@property (retain, nonatomic) IBOutlet NSView *joystickIgnoredBezel;
 
 //The bezel view used for CPU speed notifications.
-@property (retain, nonatomic) NSView *CPUSpeedBezel;
+@property (retain, nonatomic) IBOutlet NSView *CPUSpeedBezel;
 
 //The bezel view used for flightstick throttle notifications.
-@property (retain, nonatomic) NSView *throttleBezel;
+@property (retain, nonatomic) IBOutlet NSView *throttleBezel;
 
 //The bezel view used for MT-32 LCD messages.
-@property (retain, nonatomic) NSView *MT32MessageBezel;
+@property (retain, nonatomic) IBOutlet NSView *MT32MessageBezel;
 //The bezel view used for notifying the user that they need an MT-32 to hear proper music.
-@property (retain, nonatomic) NSView *MT32MissingBezel;
+@property (retain, nonatomic) IBOutlet NSView *MT32MissingBezel;
 
 //Pause/play bezel views.
-@property (retain, nonatomic) NSView *pauseBezel;
-@property (retain, nonatomic) NSView *playBezel;
+@property (retain, nonatomic) IBOutlet NSView *pauseBezel;
+@property (retain, nonatomic) IBOutlet NSView *playBezel;
 
+//Numpad simulation bezels.
+@property (retain, nonatomic) IBOutlet NSView *numpadActiveBezel;
+@property (retain, nonatomic) IBOutlet NSView *numpadInactiveBezel;
+
+//Numlock toggle bezels.
+@property (retain, nonatomic) IBOutlet NSView *numlockActiveBezel;
+@property (retain, nonatomic) IBOutlet NSView *numlockInactiveBezel;
 
 //The last bezel that was displayed.
 @property (readonly, nonatomic) NSView *currentBezel;
@@ -113,6 +124,12 @@ enum {
 
 - (void) showPauseBezel;
 - (void) showPlayBezel;
+
+- (void) showNumpadActiveBezel;
+- (void) showNumpadInactiveBezel;
+
+- (void) showNumlockActiveBezel;
+- (void) showNumlockInactiveBezel;
 
 - (void) showFullscreenBezel;
 - (void) showJoystickIgnoredBezel;

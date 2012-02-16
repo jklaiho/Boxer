@@ -9,6 +9,7 @@
 #import "BXInputControllerPrivate.h"
 #import "BXEventConstants.h"
 #import "BXDOSWindow.h"
+#import "BXBezelController.h"
 
 #import <Carbon/Carbon.h> //For keycodes
 
@@ -73,22 +74,62 @@
 		[NSApp sendAction: @selector(exitFullScreen:) to: nil from: self];
 	}
 	
-	//Otherwise, pass the keypress on to the emulated keyboard hardware.
-	//TWEAK: ignore repeat keys, as DOSBox implements its own key repeating.
-	else if (![theEvent isARepeat])
+    //Ignore repeated key events, as the emulation implements its own key-repeating.
+	else if ([theEvent isARepeat])
+    {
+        return;
+    }
+    
+    //Otherwise, pass the keypress on to the emulated keyboard hardware.
+    else
 	{
-		//Unpause the emulation whenever a key is pressed.
+		//Unpause the emulation whenever a key is sent to DOS.
 		[[self representedObject] resume: self];
-		
-		BXDOSKeyCode key = [[self class] _DOSKeyCodeForSystemKeyCode: [theEvent keyCode]];
-		[[self _emulatedKeyboard] keyDown: key];
+        
+        //Check the separate key-mapping layer for numpad simulation for this key,
+        //if the numpad simulation toggle is on or the user is holding down the Fn key.
+        BOOL fnModified = ([theEvent modifierFlags] & NSFunctionKeyMask) == NSFunctionKeyMask;
+        BOOL simulateNumpad = [self simulatedNumpadActive] || fnModified;
+        
+        CGKeyCode OSXKeyCode = [theEvent keyCode];
+        BXDOSKeyCode dosKeyCode = KBD_NONE;
+        
+        //Check if we have a different key mapping for this key when simulating a numpad.
+        if (simulateNumpad)
+        {
+            dosKeyCode = [self _simulatedNumpadKeyCodeForSystemKeyCode: OSXKeyCode];
+            if (dosKeyCode != KBD_NONE)
+                modifiedKeys[OSXKeyCode] = YES;
+        }
+        
+        //If there's no numpad-simulation key equivalent, just go with the regular mapping
+        if (dosKeyCode == KBD_NONE)
+            dosKeyCode = [self _DOSKeyCodeForSystemKeyCode: OSXKeyCode];
+        
+        if (dosKeyCode != KBD_NONE)
+            [[self _emulatedKeyboard] keyDown: dosKeyCode];
 	}
 }
 
 - (void) keyUp: (NSEvent *)theEvent
 {
-    BXDOSKeyCode key = [[self class] _DOSKeyCodeForSystemKeyCode: [theEvent keyCode]];
-    [[self _emulatedKeyboard] keyUp: key];
+    CGKeyCode OSXKeyCode = [theEvent keyCode];
+    
+    //If this key was modified to a different mapping when it was was originally pressed,
+    //then release its modified mapping too (e.g. numpad simulation).
+    if (modifiedKeys[OSXKeyCode])
+    {
+        BXDOSKeyCode modifiedKeyCode = [self _simulatedNumpadKeyCodeForSystemKeyCode: OSXKeyCode];
+        if (modifiedKeyCode != KBD_NONE)
+            [[self _emulatedKeyboard] keyUp: modifiedKeyCode];
+        
+        modifiedKeys[OSXKeyCode] = NO;
+    }
+    
+    //Release the regular key mapping in any case.
+    BXDOSKeyCode dosKeyCode = [self _DOSKeyCodeForSystemKeyCode: OSXKeyCode];
+    if (dosKeyCode != KBD_NONE)
+        [[self _emulatedKeyboard] keyUp: dosKeyCode];
 }
 
 - (void) flagsChanged: (NSEvent *)theEvent
@@ -104,6 +145,18 @@
     }
 }
 
+- (void) _notifyNumlockState
+{
+    BOOL numlockEnabled = [[self _emulatedKeyboard] numLockEnabled];
+    if (numlockEnabled)
+    {
+        [[BXBezelController controller] showNumlockActiveBezel];
+    }
+    else
+    {
+        [[BXBezelController controller] showNumlockInactiveBezel];
+    }
+}
 
 #pragma mark -
 #pragma mark Simulating keyboard events
@@ -210,10 +263,9 @@
 	}
 }
 
-+ (BXDOSKeyCode) _DOSKeyCodeForSystemKeyCode: (CGKeyCode)keyCode
+- (BXDOSKeyCode) _DOSKeyCodeForSystemKeyCode: (CGKeyCode)keyCode
 {
-#define KEYMAP_SIZE 256
-	static BXDOSKeyCode map[KEYMAP_SIZE];
+	static BXDOSKeyCode map[BXMaxSystemKeyCode];
 	static BOOL mapGenerated = NO;
 	if (!mapGenerated)
 	{
@@ -305,6 +357,9 @@
 		map[kVK_Tab] = KBD_tab;
 		map[kVK_Delete] = KBD_backspace;
 		map[kVK_ForwardDelete] = KBD_delete;
+        //NOTE: Mac keyboards have no insert key, but Ins keys on connected PC keyboards are
+        //treated as help keys by OS X.
+        map[kVK_Help] = KBD_insert;
 		map[kVK_Return] = KBD_enter;
 		map[kVK_Space] = KBD_space;
 		
@@ -343,16 +398,66 @@
 		
 		mapGenerated = YES;
 	}
+    
+    //Early return if key code is beyond the range of our mappings anyway.
+    if (keyCode > BXMaxSystemKeyCode)
+        return KBD_NONE;
 	
 	//Correction for transposed kVK_ISO_Section/kVK_ANSI_Grave on ISO keyboards.
 	if ((keyCode == kVK_ISO_Section || keyCode == kVK_ANSI_Grave) && KBGetLayoutType(LMGetKbdType()) == kKeyboardISO)
 	{
-		return (keyCode == kVK_ISO_Section) ? KBD_grave : KBD_extra_lt_gt;
+        if (keyCode == kVK_ISO_Section) keyCode = kVK_ANSI_Grave;
+        else keyCode = kVK_ISO_Section;
 	}
 	
-	else if (keyCode < KEYMAP_SIZE) return map[keyCode];
-	else return KBD_NONE;
+	return map[keyCode];
 }
 
+- (BXDOSKeyCode) _simulatedNumpadKeyCodeForSystemKeyCode: (CGKeyCode)keyCode
+{
+	static BXDOSKeyCode map[BXMaxSystemKeyCode];
+	static BOOL mapGenerated = NO;
+	if (!mapGenerated)
+	{
+        memset(&map, KBD_NONE, sizeof(map));
+		
+        map[kVK_ANSI_6] = KBD_numlock;
+        
+		map[kVK_ANSI_7] = KBD_kp7;
+		map[kVK_ANSI_8] = KBD_kp8;
+		map[kVK_ANSI_9] = KBD_kp9;
+		map[kVK_ANSI_0] = KBD_kpdivide;
+		
+		map[kVK_ANSI_U] = KBD_kp4;
+		map[kVK_ANSI_I] = KBD_kp5;
+		map[kVK_ANSI_O] = KBD_kp6;
+		map[kVK_ANSI_P] = KBD_kpmultiply;
+		
+		map[kVK_ANSI_J] = KBD_kp1;
+		map[kVK_ANSI_K] = KBD_kp2;
+		map[kVK_ANSI_L] = KBD_kp3;
+		map[kVK_ANSI_Semicolon] = KBD_kpminus;
+		
+		map[kVK_ANSI_M] = KBD_kp0;
+		map[kVK_ANSI_Comma] = KBD_kpperiod;
+        map[kVK_ANSI_Period] = KBD_kpenter;
+        map[kVK_ANSI_Slash] = KBD_kpplus;
+		
+		mapGenerated = YES;
+	}
+	
+    //Early return if key code is beyond the range of our mappings anyway.
+    if (keyCode > BXMaxSystemKeyCode)
+        return KBD_NONE;
+    
+	//Correction for transposed kVK_ISO_Section/kVK_ANSI_Grave on ISO keyboards.
+	if ((keyCode == kVK_ISO_Section || keyCode == kVK_ANSI_Grave) && KBGetLayoutType(LMGetKbdType()) == kKeyboardISO)
+	{
+        if (keyCode == kVK_ISO_Section) keyCode = kVK_ANSI_Grave;
+        else keyCode = kVK_ISO_Section;
+	}
+    
+	return map[keyCode];
+}
 
 @end

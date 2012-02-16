@@ -23,6 +23,7 @@
 #import "NSString+BXPaths.h"
 #import "UKFNSubscribeFileWatcher.h"
 #import "NSWorkspace+BXExecutableTypes.h"
+#import "BXInputController.h"
 
 #import "BXAppKitVersionHelpers.h"
 
@@ -791,7 +792,7 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
         //at the start of the autoexec sequence.
         if (!userSkippedDefaultProgram && [self targetPath] && [[self class] isExecutable: [self targetPath]])
         {
-            [theEmulator executeCommand: @"cls" encoding: BXDirectStringEncoding];
+            [theEmulator clearScreen];
         }
         
 		[self _mountDrivesForSession];
@@ -818,7 +819,7 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 	{
         //If the Option key is held down during the startup process, skip the default program.
         //(Repeated from runPreflightCommandsForEmulator: above, in case the user started
-        //holding the key down in between.
+        //holding the key down in between.)
         if (!userSkippedDefaultProgram)
         {
             CGEventFlags currentModifiers = CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState);
@@ -833,6 +834,9 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 		}
 		[self openFileAtPath: target];
 	}
+    
+    //Clear the program-skipping flag for next launch.
+    userSkippedDefaultProgram = NO;
 }
 
 - (void) emulator: (BXEmulator *)theEmulator didFinishFrame: (BXFrameBuffer *)frame
@@ -959,6 +963,12 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
     
     //Clear our cache of sent MT-32 messages on behalf of BXAudioControls.
     [MT32MessagesReceived removeAllObjects];
+    
+    //Explicitly disable numpad simulation upon returning to the DOS prompt.
+    //Disabled for now until we can record that the user has toggled the option while at the DOS prompt,
+    //and conditionally leave it on in that case, to prevent it switching off when executing commands. 
+    //[[[self DOSWindowController] inputController] setSimulatedNumpadActive: NO];
+    
         
 	//Show the program chooser after returning to the DOS prompt, as long
 	//as the program chooser hasn't been manually toggled from the DOS prompt
@@ -1206,7 +1216,8 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 	
 	//Mount our internal DOS toolkit and temporary drives
 	[self mountToolkitDriveWithError: nil];
-	[self mountTempDriveWithError: nil];
+    if (!gameProfile || [gameProfile mountTempDrive])
+        [self mountTempDriveWithError: nil];
     
     //If the game needs a CD-ROM to be present, then mount a dummy CD drive
     //if necessary.
@@ -1261,14 +1272,13 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 		
 		
 		//Add comment preambles to saved configuration
-		NSString *configurationHelpURL = [[NSBundle mainBundle] objectForInfoDictionaryKey: @"ConfigurationFileHelpURL"];
-		if (!configurationHelpURL) configurationHelpURL = @"";
-		NSString *preambleFormat = NSLocalizedStringFromTable(@"Configuration preamble", @"Configuration",
-															  @"Used generated configuration files as a commented header at the top of the file. %1$@ is an absolute URL to Boxer’s configuration setting documentation.");
-		[gameboxConf setPreamble: [NSString stringWithFormat: preambleFormat, configurationHelpURL, nil]];
-		 
-		[gameboxConf setStartupCommandsPreamble: NSLocalizedStringFromTable(@"Preamble for startup commands", @"Configuration",
-																			@"Used in generated configuration files as a commented header underneath the [autoexec] section.")];
+		NSString *preamble = NSLocalizedStringFromTable(@"Configuration preamble", @"Configuration",
+                                                        @"Used by generated configuration files as a commented header at the top of the file.");
+        NSString *autoexecPreamble = NSLocalizedStringFromTable(@"Configuration preamble", @"Configuration",
+                                                                @"Used in generated configuration files as a commented header underneath the [autoexec] section.");
+        
+		[gameboxConf setPreamble: preamble];
+		[gameboxConf setStartupCommandsPreamble: autoexecPreamble];
 		
 		
 		//Compare against the combined configuration we'll inherit from Boxer's base settings plus
