@@ -6,12 +6,7 @@
  */
 
 #import "BXExternalMIDIDevice.h"
-
-
-//The default seconds-per-byte delay to allow after sending a sysex.
-//Equivalent to the MIDI 1.0 specified delay of 3125 bytes/sec.
-#define BXExternalMIDIDeviceDefaultSysexRate 1.0f / 3125.0f
-
+#import "BXExternalMIDIDevice+BXGeneralMIDISysexes.h"
 
 #pragma mark -
 #pragma mark Private method declarations
@@ -26,6 +21,11 @@
 
 - (BOOL) _connectToDestinationAtUniqueID: (MIDIUniqueID)uniqueID
                                    error: (NSError **)outError;
+
+//The callback for our volume synchronization timer.
+//Calls syncVolume and invalidates the timer.
+- (void) _performVolumeSync: (NSTimer *)timer;
+
 @end
 
 
@@ -35,6 +35,8 @@
 @implementation BXExternalMIDIDevice
 @synthesize dateWhenReady = _dateWhenReady;
 @synthesize destination = _destination;
+@synthesize volume = _volume;
+@synthesize requestedVolume = _requestedVolume;
 
 #pragma mark -
 #pragma mark Class helper methods
@@ -58,7 +60,10 @@
 {
     if ((self = [super init]))
     {
-        [self setDateWhenReady: [NSDate distantPast]];
+        //Don't use setVolume:, as it will try to send a message.
+        _volume = 1.0f;
+        _requestedVolume = 1.0f;
+        self.dateWhenReady = [NSDate distantPast];
         _secondsPerByte = BXExternalMIDIDeviceDefaultSysexRate;
     }
     return self;
@@ -117,7 +122,9 @@
 - (void) dealloc
 {
     [self close];
-    [self setDateWhenReady: nil], [_dateWhenReady release];
+    
+    self.dateWhenReady = nil;
+    
     [super dealloc];
 }
 
@@ -146,11 +153,11 @@
                          error: (NSError **)outError
 {
     //Create a MIDI client and port
-    OSStatus errCode = MIDIClientCreate((CFStringRef)[[self class] defaultClientName], NULL, NULL, &_client);
+    OSStatus errCode = MIDIClientCreate((CFStringRef)[self class].defaultClientName, NULL, NULL, &_client);
     
     if (errCode == noErr)
     {
-        errCode = MIDIOutputPortCreate(_client, (CFStringRef)[[self class] defaultPortName], &_port);
+        errCode = MIDIOutputPortCreate(_client, (CFStringRef)[self class].defaultPortName, &_port);
     }
     
     if (errCode != noErr)
@@ -180,7 +187,6 @@
     }
     
     return YES;
-    
 }
 
 - (BOOL) _connectToDestinationAtIndex: (ItemCount)destIndex
@@ -234,7 +240,7 @@
 
 - (NSTimeInterval) processingDelayForSysex: (NSData *)sysex
 {
-    return _secondsPerByte * [sysex length];
+    return _secondsPerByte * sysex.length;
 }
 
 - (BOOL) supportsMT32Music
@@ -252,25 +258,55 @@
 - (BOOL) isProcessing
 {
     //We're still processing if our readiness date is in the future
-    return [[self dateWhenReady] timeIntervalSinceNow] > 0;
+    return self.dateWhenReady.timeIntervalSinceNow > 0;
 }
 
 
 - (void) handleMessage: (NSData *)message
 {
     NSAssert(_port && _destination, @"handleMessage: called before successful initialization.");
-    NSAssert([message length] > 0, @"0-length message received by handleMessage:");
+    NSAssert(message.length > 0, @"0-length message received by handleMessage:");
     
     UInt8 buffer[sizeof(MIDIPacketList)];
     MIDIPacketList *packetList = (MIDIPacketList *)buffer;
 	MIDIPacket *currentPacket = MIDIPacketListInit(packetList);
     
-    MIDIPacketListAdd(packetList, sizeof(buffer), currentPacket, (MIDITimeStamp)0, [message length], (UInt8 *)[message bytes]);
+    MIDIPacketListAdd(packetList, sizeof(buffer), currentPacket, (MIDITimeStamp)0, message.length, (UInt8 *)message.bytes);
     
     MIDISend(_port, _destination, packetList);
 }
 
 - (void) handleSysex: (NSData *)message
+{
+    //Sniff the sysex to see if it's a request to set the master volume.
+    //If so, capture the volume and substitute our own sysex containing our scaled volume.
+    float requestedVolume;
+    if ([[self class] isMasterVolumeSysex: message withVolume: &requestedVolume])
+    {
+#if BOXER_DEBUG
+        NSLog(@"Program attempted to set master volume of %f", requestedVolume);
+#endif
+        self.requestedVolume = requestedVolume;
+        [self syncVolume];
+    }
+    else
+    {
+        [self dispatchSysex: message];
+        
+        //Sniff the sysex to see if it's a message that would reset the device's master volume.
+        //If so, reapply our own volume after it.
+        if ([[self class] sysexResetsMasterVolume: message])
+        {
+#if BOXER_DEBUG
+            NSLog(@"Program attempted to reset master volume with sysex: %@", message);
+#endif
+            self.requestedVolume = 1.0f;
+            [self scheduleVolumeSync];
+        }
+    }
+}
+
+- (void) dispatchSysex: (NSData *)message
 {
 //The same length as DOSBox's MIDI message buffer, plus padding for extra data used by the packet list.
 //(Technically a sysex message could be much longer than 1024 bytes, but it would be truncated by DOSBox
@@ -278,20 +314,20 @@
 #define MAX_SYSEX_PACKET_SIZE 1024 * 4
 
     NSAssert(_port && _destination, @"handleMessage: called before successful initialization.");
-    NSAssert([message length] > 0, @"0-length message received by handleMessage:");
+    NSAssert(message.length > 0, @"0-length message received by handleMessage:");
 
     UInt8 buffer[MAX_SYSEX_PACKET_SIZE];
     MIDIPacketList *packetList = (MIDIPacketList *)buffer;
 	MIDIPacket *currentPacket = MIDIPacketListInit(packetList);
     
-    MIDIPacketListAdd(packetList, sizeof(buffer), currentPacket, (MIDITimeStamp)0, [message length], (UInt8 *)[message bytes]);
+    MIDIPacketListAdd(packetList, sizeof(buffer), currentPacket, (MIDITimeStamp)0, message.length, (UInt8 *)message.bytes);
     
     MIDISend(_port, _destination, packetList);
     
     //Now, calculate how long it should take the device to process all that
     NSTimeInterval processingDelay = [self processingDelayForSysex: message];
     if (processingDelay > 0)
-        [self setDateWhenReady: [NSDate dateWithTimeIntervalSinceNow: processingDelay]];
+        self.dateWhenReady = [NSDate dateWithTimeIntervalSinceNow: processingDelay];
 }
 
 - (void) pause
@@ -314,7 +350,73 @@
 
 - (void) resume
 {
+    //No resume message is needed, instead we'll resume playing once new MIDI data comes in.
+}
+
+- (void) setVolume: (float)volume
+{
+    NSAssert(_port && _destination, @"setVolume: called before successful initialization.");
     
+    volume = MIN(1.0f, volume);
+    volume = MAX(0.0f, volume);
+    
+    if (self.volume != volume)
+    {
+        _volume = volume;
+        [self scheduleVolumeSync];
+    }
+}
+
+- (void) setRequestedVolume: (float)volume
+{
+    volume = MIN(1.0f, volume);
+    volume = MAX(0.0f, volume);
+    
+    _requestedVolume = volume;
+}
+
+- (void) scheduleVolumeSync
+{
+    //If we already have a timer in progress, don't reschedule.
+    if (!_volumeSyncTimer)
+    {
+        NSTimeInterval timeUntilReady = MAX(0.0, self.dateWhenReady.timeIntervalSinceNow);
+        NSTimeInterval syncDelay = timeUntilReady + BXVolumeSyncDelay;
+        
+        //No need to retain it, since it'll be retained by the runloop until it fires
+        _volumeSyncTimer = [NSTimer scheduledTimerWithTimeInterval: syncDelay
+                                                            target: self
+                                                          selector: @selector(_performVolumeSync:)
+                                                          userInfo: nil
+                                                           repeats: NO];
+    }
+}
+
+- (void) _performVolumeSync: (NSTimer *)timer
+{
+    //Invalidate and clear our sync timer.
+    [_volumeSyncTimer invalidate];
+    _volumeSyncTimer = nil;
+    
+    //Only try to sync the volume if we're still connected.
+    if (_port && _destination)
+    {   
+        //If we're still busy processing, then defer the sync until after another delay.
+        if (self.isProcessing)
+            [self scheduleVolumeSync];
+        else
+            [self syncVolume];
+    }
+}
+
+- (void) syncVolume
+{
+    //If this method gets called manually, cancel the timer and clear it.
+    [_volumeSyncTimer invalidate];
+    _volumeSyncTimer = nil;
+    
+    NSData *volumeMessage = [[self class] sysexWithMasterVolume: self.volume * self.requestedVolume];
+    [self dispatchSysex: volumeMessage];
 }
 
 @end

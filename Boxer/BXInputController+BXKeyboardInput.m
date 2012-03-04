@@ -1,17 +1,17 @@
-//
-//  BXInputController+BXKeyboardInput.m
-//  Boxer
-//
-//  Created by Alun Bestor on 26/04/2011.
-//  Copyright 2011 Alun Bestor and contributors. All rights reserved.
-//
+/* 
+ Boxer is copyright 2011 Alun Bestor and contributors.
+ Boxer is released under the GNU General Public License 2.0. A full copy of this license can be
+ found in this XCode project at Resources/English.lproj/BoxerHelp/pages/legalese.html, or read
+ online at [http://www.gnu.org/licenses/gpl-2.0.txt].
+ */
 
 #import "BXInputControllerPrivate.h"
 #import "BXEventConstants.h"
 #import "BXDOSWindow.h"
 #import "BXBezelController.h"
 
-#import <Carbon/Carbon.h> //For keycodes
+//For keycodes and input source methods
+#import <Carbon/Carbon.h>
 
 
 @implementation BXInputController (BXKeyboardInput)
@@ -20,6 +20,7 @@
 {
 	TISInputSourceRef keyboardRef	= TISCopyCurrentKeyboardLayoutInputSource();
 	NSString *inputSourceID			= (NSString *)TISGetInputSourceProperty(keyboardRef, kTISPropertyInputSourceID);
+    //NSLog(@"%@", inputSourceID);
 	CFRelease(keyboardRef);
 	
 	return [self keyboardLayoutForInputSourceID: inputSourceID];
@@ -52,6 +53,15 @@
 	return mappings;
 }
 
+- (void) _syncKeyboardLayout
+{
+    //Sync the DOS keyboard layout to match the current OS X layout as best as possible.
+    NSString *bestLayoutMatch = [[self class] keyboardLayoutForCurrentInputMethod];
+    if (bestLayoutMatch)
+    {
+        [[self _emulatedKeyboard] setActiveLayout: bestLayoutMatch];
+    }
+}
 
 #pragma mark -
 #pragma mark Key events
@@ -61,37 +71,42 @@
 	//If the keypress was command-modified, don't pass it on to the emulator as it indicates
 	//a failed key equivalent.
 	//(This is consistent with how other OS X apps with textinput handle Cmd-keypresses.)
-	if ([theEvent modifierFlags] & NSCommandKeyMask)
+	if ((theEvent.modifierFlags & NSCommandKeyMask) == NSCommandKeyMask)
 	{
-		[super keyDown: theEvent];
-	}
-	
-	//Pressing ESC while in fullscreen mode and not running a program will exit fullscreen mode.
-	else if ([[theEvent charactersIgnoringModifiers] isEqualToString: @"\e"] &&
-		[[[self _windowController] window] isFullScreen] &&
-		[[[self representedObject] emulator] isAtPrompt])
-	{
-		[NSApp sendAction: @selector(exitFullScreen:) to: nil from: self];
-	}
-	
-    //Ignore repeated key events, as the emulation implements its own key-repeating.
-	else if ([theEvent isARepeat])
-    {
+        [super keyDown: theEvent];
         return;
+	}
+	
+    //Conditional behaviour for the ESC key:
+	if ([theEvent.charactersIgnoringModifiers isEqualToString: @"\e"])
+    {
+        //Pressing ESC while text is being typed in (e.g. via a paste) will cancel the typing.
+        if (self._emulatedKeyboard.isTyping)
+        {
+            [self._emulatedKeyboard cancelTyping];
+            return;
+        }
+        //Pressing ESC while in fullscreen mode and not running a program, will exit fullscreen mode.
+        else if (self._windowController.window.isFullScreen && self.representedObject.emulator.isAtPrompt)
+        {
+            [NSApp sendAction: @selector(exitFullScreen:) to: nil from: self];
+            return;
+        }
     }
-    
+	
     //Otherwise, pass the keypress on to the emulated keyboard hardware.
-    else
-	{
+    //Ignore repeated key events, as the emulation implements its own key-repeating.
+	if (!theEvent.isARepeat)
+    {
 		//Unpause the emulation whenever a key is sent to DOS.
-		[[self representedObject] resume: self];
+		[self.representedObject resume: self];
         
         //Check the separate key-mapping layer for numpad simulation for this key,
         //if the numpad simulation toggle is on or the user is holding down the Fn key.
-        BOOL fnModified = ([theEvent modifierFlags] & NSFunctionKeyMask) == NSFunctionKeyMask;
-        BOOL simulateNumpad = [self simulatedNumpadActive] || fnModified;
+        BOOL fnModified = (theEvent.modifierFlags & NSFunctionKeyMask) == NSFunctionKeyMask;
+        BOOL simulateNumpad = self.simulatedNumpadActive || fnModified;
         
-        CGKeyCode OSXKeyCode = [theEvent keyCode];
+        CGKeyCode OSXKeyCode = theEvent.keyCode;
         BXDOSKeyCode dosKeyCode = KBD_NONE;
         
         //Check if we have a different key mapping for this key when simulating a numpad.
@@ -107,7 +122,7 @@
             dosKeyCode = [self _DOSKeyCodeForSystemKeyCode: OSXKeyCode];
         
         if (dosKeyCode != KBD_NONE)
-            [[self _emulatedKeyboard] keyDown: dosKeyCode];
+            [self._emulatedKeyboard keyDown: dosKeyCode];
 	}
 }
 
@@ -134,15 +149,9 @@
 
 - (void) flagsChanged: (NSEvent *)theEvent
 {
-	[self _syncModifierFlags: [theEvent modifierFlags]];
-    
-    //Cmd-key tweak: in 10.7 at least, we won't receive keyUp: events for any key while
-    //Cmd is being held down. To prevent keys getting stuck, we immediately release any
-    //keys that were down when Cmd is first pressed.
-    if (([theEvent modifierFlags] & NSCommandKeyMask) == NSCommandKeyMask)
-    {
-        [[self _emulatedKeyboard] clearInput];
-    }
+    NSUInteger currentModifiers = [theEvent modifierFlags];
+	[self _syncModifierFlags: currentModifiers];
+    [self _syncSimulatedMouseButtons: currentModifiers];
 }
 
 - (void) _notifyNumlockState
@@ -189,6 +198,11 @@
 - (IBAction) sendScrollLock:	(id)sender { [[self _emulatedKeyboard] keyPressed: KBD_scrolllock]; }
 - (IBAction) sendPrintScreen:	(id)sender { [[self _emulatedKeyboard] keyPressed: KBD_printscreen]; }
 
+
+- (void) type: (NSString *)message
+{
+    [self._emulatedKeyboard typeCharacters: message];
+}
 
 #pragma mark -
 #pragma mark Private methods
@@ -244,7 +258,7 @@
 				
 				//Special handling for capslock key: whenever the flag is toggled,
 				//act like the key was pressed and then released shortly after.
-				//(We never receive receive actual keyup events for this key.)
+				//(We never receive actual keyup events for this key.)
 				if (flag == NSAlphaShiftKeyMask)
 				{
 					[keyboard keyPressed: keyCode];
@@ -259,6 +273,7 @@
 				}
 			}
 		}
+        
 		lastModifiers = newModifiers;
 	}
 }

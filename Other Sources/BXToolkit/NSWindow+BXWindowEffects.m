@@ -11,7 +11,7 @@
 #pragma mark -
 #pragma mark Private method declarations
 
-@interface NSWindow ()
+@interface NSWindow (BXWindowEffectsPrivate)
 //Completes the ordering out from a fadeOutWithDuration: call.
 - (void) _orderOutAfterFade;
 @end
@@ -21,26 +21,29 @@
 
 - (void) fadeInWithDuration: (NSTimeInterval)duration
 {
-	if ([self isVisible]) return;
-	
-	[self setAlphaValue: 0.0f];
-	[self orderFront: self];
-	
-	[NSAnimationContext beginGrouping];
-    [[NSAnimationContext currentContext] setDuration: duration];
-    [[self animator] setAlphaValue: 1.0f];
-	[NSAnimationContext endGrouping];
-	
+    //Don't bother fading in if we're already completely visible; just cancel any pending order-out.
+	if (!self.isVisible || self.alphaValue < 1.0f)
+    {
+        //Hide ourselves completely if we weren't visible, before fading in.
+        if (!self.isVisible) self.alphaValue = 0.0f;
+        
+        [self orderFront: self];
+        
+        [NSAnimationContext beginGrouping];
+            [NSAnimationContext currentContext].duration = duration;
+            [self.animator setAlphaValue: 1.0f];
+        [NSAnimationContext endGrouping];
+	}
 	[NSObject cancelPreviousPerformRequestsWithTarget: self selector: @selector(_orderOutAfterFade) object: nil];
 }
 
 - (void) fadeOutWithDuration: (NSTimeInterval)duration
 {
-	if (![self isVisible]) return;
+	if (!self.isVisible) return;
 	
 	[NSAnimationContext beginGrouping];
     [[NSAnimationContext currentContext] setDuration: duration];
-    [[self animator] setAlphaValue: 0.0f];
+    [self.animator setAlphaValue: 0.0f];
 	[NSAnimationContext endGrouping];
 	[self performSelector: @selector(_orderOutAfterFade) withObject: nil afterDelay: duration];
 }
@@ -51,7 +54,8 @@
 	[self orderOut: self];
 	[self didChangeValueForKey: @"visible"];
 	
-	[self setAlphaValue: 1.0f];
+    //Restore our alpha value after we've finished ordering out.
+	self.alphaValue = 1.0f;
 }
 
 @end
@@ -60,7 +64,7 @@
 
 #ifdef USE_PRIVATE_APIS
 
-@interface NSWindow ()
+@interface NSWindow (BXPrivateAPIWindowEffectsReallyPrivate)
 //Cleans up after a transition by releasing the specified handle.
 - (void) _releaseTransitionHandle: (NSNumber *)handleNum;
 
@@ -69,11 +73,11 @@
 //transition is invoked: this allows the callback to update the window state
 //(or show/hide the window) for the end of the transition.
 - (void) _applyCGSTransition: (CGSTransitionType)type
-direction: (CGSTransitionOption)direction
-duration: (NSTimeInterval)duration
-withCallback: (SEL)callback
-callbackObject: (id)callbackObj
-blockingMode: (NSAnimationBlockingMode)blockingMode;
+                   direction: (CGSTransitionOption)direction
+                    duration: (NSTimeInterval)duration
+                withCallback: (SEL)callback
+              callbackObject: (id)callbackObj
+                blockingMode: (NSAnimationBlockingMode)blockingMode;
 
 //Takes the float value of the specified number and sets the window's alpha to it.
 //Used for showing/hiding windows during a transition.

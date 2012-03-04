@@ -17,6 +17,9 @@
 //How long keyPressed: should pretend to hold the specified key down before releasing.
 #define BXKeyPressDurationDefault 0.25
 
+//How long typeCharacters should wait in between bursts of typing.
+//This needs to be high enough that we don't overload a DOS program's own keyboard buffer.
+#define BXTypingBurstIntervalDefault 0.4
 
 typedef KBD_KEYS BXDOSKeyCode;
 
@@ -25,24 +28,40 @@ typedef KBD_KEYS BXDOSKeyCode;
 	BOOL capsLockEnabled;
 	BOOL numLockEnabled;
     BOOL scrollLockEnabled;
-	NSString *activeLayout;
-	NSUInteger pressedKeys[KBD_LAST];
+    NSUInteger pressedKeys[KBD_LAST];
+    
+	NSString *preferredLayout;
+    
+    NSTimer *pendingKeypresses;
 }
 
-@property (assign) BOOL capsLockEnabled;
-@property (assign) BOOL numLockEnabled;
-@property (assign) BOOL scrollLockEnabled;
+@property (readonly) BOOL capsLockEnabled;
+@property (readonly) BOOL numLockEnabled;
+@property (readonly) BOOL scrollLockEnabled;
 
-@property (copy) NSString *activeLayout;
+//The DOS keyboard layout that is currently in use.
+@property (copy, nonatomic) NSString *activeLayout;
+
+//Whether to map keyboard input through the active keyboard layout.
+//If NO, input will be mapped according to a standard US keyboard layout instead.
+@property (assign, nonatomic) BOOL usesActiveLayout;
+
+//The DOS keyboard layout that will be applied once emulation has started up.
+//Set whenever activeLayout is changed.
+@property (copy) NSString *preferredLayout;
+
+//Returns YES if the emulated keyboard buffer is full, meaning further key events will be ignored.
+@property (readonly) BOOL keyboardBufferFull;
+
+//Whether we are currently typing text into the keyboard. Will be YES while the input from
+//typeCharacters: is being processed.
+@property (readonly) BOOL isTyping;
 
 
 #pragma mark -
 #pragma mark Keyboard input
 
-//Press/release the specified key. Calls to keyDown: will stack to handle the same
-//keycode being sent from multiple sources, so each keyDown: should be paired with
-//a corresponding keyUp:. (Only the first keyDown: and the last keyUp: will actually
-//trigger emulated keypresses.)
+//Press/release the specified key.
 - (void) keyDown: (BXDOSKeyCode)key;
 - (void) keyUp: (BXDOSKeyCode)key;
 
@@ -53,7 +72,6 @@ typedef KBD_KEYS BXDOSKeyCode;
 //has been called on it.
 - (void) clearKey: (BXDOSKeyCode)key;
 
-
 //Imitate the key being pressed and then released after the default/specified duration.
 - (void) keyPressed: (BXDOSKeyCode)key;
 - (void) keyPressed: (BXDOSKeyCode)key forDuration: (NSTimeInterval)duration;
@@ -61,9 +79,19 @@ typedef KBD_KEYS BXDOSKeyCode;
 //Returns whether the specified key is currently pressed.
 - (BOOL) keyIsDown: (BXDOSKeyCode)key;
 
+//Simulate typing the specified characters into the keyboard.
+//To avoid flooding the keyboard buffer, characters will be sent
+//in bursts with the specified interval between bursts.
+- (void) typeCharacters: (NSString *)characters burstInterval: (NSTimeInterval)interval;
+- (void) typeCharacters: (NSString *)characters;
+
+//Cancel any pending keydown events and empty the queue.
+- (void) cancelTyping;
+
+
 
 #pragma mark -
-#pragma mark Keyboard layout mapping
+#pragma mark 
 
 //The default DOS keyboard layout that should be used if no more specific one can be found.
 + (NSString *)defaultKeyboardLayout;

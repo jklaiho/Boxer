@@ -337,10 +337,12 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 	{
 		if (emulator)
 		{
-			[emulator setDelegate: nil];
-			[[emulator videoHandler] unbind: @"aspectCorrected"];
-			[[emulator videoHandler] unbind: @"filterType"];
+			emulator.delegate = nil;
+			[emulator.videoHandler unbind: @"aspectCorrected"];
+			[emulator.videoHandler unbind: @"filterType"];
 			
+            [emulator unbind: @"masterVolume"];
+            
 			[self _deregisterForPauseNotifications];
 			[self _deregisterForFilesystemNotifications];
 		}
@@ -349,14 +351,15 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 		emulator = [newEmulator retain];
 		
 		if (newEmulator)
-		{
+		{	
+			newEmulator.delegate = (id)self;
+			
 			NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-			
-			[newEmulator setDelegate: (id)self];
-			
-			//FIXME: we shouldn't be using bindings for these
-			[[newEmulator videoHandler] bind: @"aspectCorrected" toObject: defaults withKeyPath: @"aspectCorrected" options: nil];
-			[[newEmulator videoHandler] bind: @"filterType" toObject: defaults withKeyPath: @"filterType" options: nil];
+            
+            [newEmulator bind: @"masterVolume" toObject: [NSApp delegate] withKeyPath: @"effectiveVolume" options: nil];
+            
+			[newEmulator.videoHandler bind: @"aspectCorrected" toObject: defaults withKeyPath: @"aspectCorrected" options: nil];
+			[newEmulator.videoHandler bind: @"filterType" toObject: defaults withKeyPath: @"filterType" options: nil];
 			
 			[self _registerForFilesystemNotifications];
 			[self _registerForPauseNotifications];
@@ -708,7 +711,7 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 	//a properly initialized state, and can respond properly to
 	//commands and settings changes.
 	//TODO: move this decision off to the emulator itself.
-	[self setEmulating: YES];
+	self.emulating = YES;
     
     //Start preventing the display from going to sleep
     [self _syncSuppressesDisplaySleep];
@@ -717,19 +720,18 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 - (void) emulatorDidFinish: (NSNotification *)notification
 {
 	//Flag that we're no longer emulating
-	[self setEmulating: NO];
-    
+	self.emulating = NO;
     //Turn off display-sleep suppression
     [self _syncSuppressesDisplaySleep];
 	
 	//Clear our drive and program caches
-	[self setLastExecutedProgramPath: nil];
-    [self setLastLaunchedProgramPath: nil];
+	self.lastExecutedProgramPath = nil;
+    self.lastLaunchedProgramPath = nil;
 	
-	[self setDrives: nil];
+	self.drives = nil;
 
 	//Clear the final rendered frame
-	[[self DOSWindowController] updateWithFrame: nil];
+	[self.DOSWindowController updateWithFrame: nil];
 	
 	//Close the document once we're done, if desired
 	if ([self _shouldCloseOnEmulatorExit]) [self close];
@@ -790,7 +792,7 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
         
         //If we'll be starting up with a target program, clear the screen
         //at the start of the autoexec sequence.
-        if (!userSkippedDefaultProgram && [self targetPath] && [[self class] isExecutable: [self targetPath]])
+        if (!userSkippedDefaultProgram && self.targetPath && [[self class] isExecutable: self.targetPath])
         {
             [theEmulator clearScreen];
         }
@@ -807,14 +809,14 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 	hasLaunched = YES;
     
     //Do any just-in-time configuration, which should override all previous startup stuff.
-	NSNumber *frameskip = [gameSettings objectForKey: @"frameskip"];
+	NSNumber *frameskip = [self.gameSettings objectForKey: @"frameskip"];
 	if (frameskip && [self validateValue: &frameskip forKey: @"frameskip" error: nil])
 		[self setValue: frameskip forKey: @"frameskip"];
 	
 	
 	//After all preflight configuration has finished, go ahead and open whatever
     //file or folder we're pointing at.
-	NSString *target = [self targetPath];
+	NSString *target = self.targetPath;
 	if (target)
 	{
         //If the Option key is held down during the startup process, skip the default program.
@@ -841,22 +843,24 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 
 - (void) emulator: (BXEmulator *)theEmulator didFinishFrame: (BXFrameBuffer *)frame
 {
-	[[self DOSWindowController] updateWithFrame: frame];
+	[self.DOSWindowController updateWithFrame: frame];
 }
 
 - (NSSize) maxFrameSizeForEmulator: (BXEmulator *)theEmulator
 {
-	return [[self DOSWindowController] maxFrameSize];
+	return self.DOSWindowController.maxFrameSize;
 }
 
 - (NSSize) viewportSizeForEmulator: (BXEmulator *)theEmulator
 {
-	return [[self DOSWindowController] viewportSize];
+	return self.DOSWindowController.viewportSize;
 }
 
 - (void) processEventsForEmulator: (BXEmulator *)theEmulator
 {
-	[self _processEventsUntilDate: nil];
+    //Only pump the event queue ourselves if the emulator has taken over the main thread.
+    if (!theEmulator.isConcurrent)
+        [self _processEventsUntilDate: nil];
 }
 
 - (void) emulatorWillStartRunLoop: (BXEmulator *)theEmulator {}
@@ -1064,7 +1068,20 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 	{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         
-		[NSApp sendEvent: event];
+        //Listen for key-up events for our fast-forward key and handle them ourselves.
+        //Swallow all key-down events while this is happening.
+        //IMPLEMENTATION NOTE: this is essentially a standard Cocoa event-listening loop
+        //turned inside out, so that the emulation will keep running 'around' our listening.
+        if (waitingForFastForwardRelease)
+        {
+            if (event.type == NSKeyUp)
+                [self releaseFastForward: self];
+            else if (event.type == NSKeyDown)
+                event = nil;
+        }
+        
+        if (event)
+            [NSApp sendEvent: event];
 		
 		//If we're suspended, keep dispatching events until we are unpaused;
         //otherwise, exit once our original requested date has passed (which
@@ -1142,7 +1159,10 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 	}
 	
 	//Start up the emulator itself.
-	[[self emulator] start];
+    if ([[NSUserDefaults standardUserDefaults] boolForKey: @"useMultithreadedEmulation"])
+        [self.emulator performSelectorInBackground: @selector(start) withObject: nil];
+    else
+        [self.emulator start];
 }
 
 - (void) _mountDrivesForSession
@@ -1328,17 +1348,17 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 
 + (NSSet *) keyPathsForValuesAffectingProgramIsActive
 {
-    return [NSSet setWithObjects: @"suspended", @"emulating", @"emulator.isAtPrompt", nil];
+    return [NSSet setWithObjects: @"paused", @"autopaused", @"emulating", @"emulator.isAtPrompt", nil];
 }
 
 - (BOOL) programIsActive
 {
-    if ([self isSuspended]) return NO;
-    if (![self isEmulating]) return NO;
+    if (self.isPaused || self.isAutoPaused) return NO;
+    if (!self.isEmulating) return NO;
     
-    @synchronized([self emulator])
+    @synchronized(self.emulator)
     {
-        if ([[self emulator] isAtPrompt]) return NO;
+        if (self.emulator.isAtPrompt) return NO;
     }
     
     return YES;
@@ -1375,58 +1395,60 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 {
 	if (suspended != flag)
 	{
-		suspended = flag;
-
-		//Tell the emulator to prepare for being suspended, or to resume after we unpause.
-        //Also tell OS X's power management that it's OK/not OK to put the display to sleep.
-		if (suspended)
-		{
-			[emulator willPause];
-		}
-		else
-		{
-			[emulator didResume];
-		}
-        
         //Enable/disable display-sleep suppression
         [self _syncSuppressesDisplaySleep];
         
-        //The suspended state is only checked inside the event loop
-        //inside -emulatorDidBeginRunLoop:, which only processes when
-        //there's any events in the queue. We post a dummy event to ensure
-        //that the loop ticks over and recognises the pause state.
-        NSEvent *dummyEvent = [NSEvent otherEventWithType: NSApplicationDefined
-                                                 location: NSZeroPoint
-                                            modifierFlags: 0
-                                                timestamp: CFAbsoluteTimeGetCurrent()
-                                             windowNumber: 0
-                                                  context: nil
-                                                  subtype: 0
-                                                    data1: 0
-                                                    data2: 0];
+		suspended = flag;
         
-        [NSApp postEvent: dummyEvent atStart: NO];
+		//Tell the emulator to prepare for being suspended, or to resume after we unpause.
+        if (suspended)
+        {
+            [emulator pause];
+        }
+        else
+        {
+            [emulator resume];
+        }
+        
+        if (!emulator.isConcurrent)
+        { 
+            //The suspended state is only checked inside the event loop
+            //inside -emulatorDidBeginRunLoop:, which only processes when
+            //there's any events in the queue. We post a dummy event to ensure
+            //that the loop ticks over and recognises the pause state.
+            NSEvent *dummyEvent = [NSEvent otherEventWithType: NSApplicationDefined
+                                                     location: NSZeroPoint
+                                                modifierFlags: 0
+                                                    timestamp: CFAbsoluteTimeGetCurrent()
+                                                 windowNumber: 0
+                                                      context: nil
+                                                      subtype: 0
+                                                        data1: 0
+                                                        data2: 0];
+            
+            [NSApp postEvent: dummyEvent atStart: NO];
+        }
 	}
 }
 
 - (void) _syncSuspendedState
 {
-	[self setSuspended: (interrupted || paused || autoPaused)];
+	self.suspended = (paused || autoPaused || (interrupted && !emulator.isConcurrent));
 }
 
 - (void) _syncAutoPausedState
 {
-	[self setAutoPaused: [self _shouldAutoPause]];
+    self.autoPaused = [self _shouldAutoPause];
 }
 
 - (BOOL) _shouldAutoPause
 {
 	//Don't auto-pause if the emulator hasn't finished starting up yet.
-	if (![self isEmulating]) return NO;
+	if (!self.isEmulating) return NO;
 	
 	//Only allow auto-pausing if the mode is enabled in the user's settings,
     //or if the emulator is waiting at the DOS prompt.
-	if ([[self emulator] isAtPrompt] ||
+	if (self.emulator.isAtPrompt ||
         [[NSUserDefaults standardUserDefaults] boolForKey: @"pauseWhileInactive"])
     {
         //Auto-pause if Boxer is in the background.
@@ -1436,7 +1458,7 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
         //IMPLEMENTATION NOTE: we used to toggle this when the DOS window was hidden (not visible),
         //but that gave rise to corner cases if shouldAutoPause was called just before the window
         //was to appear.
-        if ([[DOSWindowController window] isMiniaturized]) return YES;
+        if (self.DOSWindowController.window.isMiniaturized) return YES;
     }
 	
     return NO;
@@ -1548,9 +1570,9 @@ NSString * const BXDidFinishInterruptionNotification = @"BXDidFinishInterruption
 
 - (BOOL) _shouldSuppressDisplaySleep
 {
-    if (![self isEmulating]) return NO;
-    if ([self isPaused] || [self isAutoPaused]) return NO;
-    if ([[self emulator] isAtPrompt]) return NO;
+    if (!self.isEmulating) return NO;
+    if (self.isPaused || self.isAutoPaused) return NO;
+    if (self.emulator.isAtPrompt) return NO;
     return YES;
 }
 

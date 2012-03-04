@@ -50,9 +50,6 @@ extern "C" {
 	//Called from messages.cpp: overrides DOSBox's translation system.
 	const char * boxer_localizedStringForKey(char const * key);
 	
-	//Called from dos_keyboard_layout.cpp: provides the current OS X keyboard layout as a DOSBox layout code.
-	const char * boxer_currentDOSKeyboardLayout();
-	
 	//Called from dos_programs.cpp: verifies that DOSBox is allowed to mount the specified folder.
 	bool boxer_shouldMountPath(const char *filePath);
 	
@@ -98,11 +95,18 @@ extern "C" {
     void boxer_setJoystickActive(bool joystickActive);
 	void boxer_setMouseActive(bool mouseActive);
 	void boxer_mouseMovedToPoint(float x, float y);
-	
-	bool boxer_capsLockEnabled();
-	bool boxer_numLockEnabled();
-	
-	double boxer_realTime();
+    
+    //Defined in keyboard.cpp to let Boxer see if there's any room left in the keyboard buffer.
+    Bitu boxer_keyboardBufferRemaining();
+    
+    //Defined in dos_keyboard_layout.cpp.
+    bool boxer_keyboardLayoutLoaded();
+    bool boxer_keyboardLayoutSupported(const char *code);
+    bool boxer_keyboardLayoutActive();
+    void boxer_setKeyboardLayoutActive(bool active);
+    
+	//Called from dos_keyboard_layout.cpp: provides the current OS X keyboard layout as a DOSBox layout code.
+	const char * boxer_preferredKeyboardLayout();
     
     void boxer_log(char const* format,...);
     void boxer_die(char const *functionName, char const *fileName, int lineNumber, char const* format,...);

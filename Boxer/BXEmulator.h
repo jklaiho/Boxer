@@ -55,6 +55,10 @@ typedef NSUInteger BXJoystickSupportLevel;
 extern NSStringEncoding BXDisplayStringEncoding;	//Used for strings that will be displayed to the user
 extern NSStringEncoding BXDirectStringEncoding;		//Used for file path strings that must be preserved raw
 
+//The name and path to the DOSBox shell. Used when determining the current process.
+extern NSString * const shellProcessName;
+extern NSString * const shellProcessPath;
+
 
 @class BXVideoHandler;
 @class BXEmulatedKeyboard;
@@ -75,7 +79,10 @@ extern NSStringEncoding BXDirectStringEncoding;		//Used for file path strings th
 	BXEmulatedMouse *mouse;
 	id <BXEmulatedJoystick> joystick;
     
+    
     BOOL joystickActive;
+    
+    float masterVolume;
 	
 	NSString *processName;
 	NSString *processPath;
@@ -86,16 +93,25 @@ extern NSStringEncoding BXDirectStringEncoding;		//Used for file path strings th
 	BOOL cancelled;
 	BOOL executing;
 	BOOL initialized;
-	BOOL isInterrupted;
+	BOOL paused;
+    BOOL wasAutoSpeed;
+    
+    //Whether an SDL CD-ROM was playing when we paused the emulator.
+    //Used to selectively resume CD-ROM playback after unpausing.
+    BOOL cdromWasPlaying;
     
     //The autorelease pool for the current iteration of DOSBox's run loop.
     //Created in _willStartRunLoop and released in _didFinishRunLoop.
     NSAutoreleasePool *poolForRunLoop;
+    
+    //The thread on which start was called.
+    NSThread *emulationThread;
 	
-	//Used by BXShell
+	//The queue of commands we are waiting to execute at the DOS prompt.
+    //Managed by BXShell.
 	NSMutableArray *commandQueue;
     
-    //Used by BXAudio
+    //Managed by BXAudio.
     id <BXMIDIDevice> activeMIDIDevice;
     NSDictionary *requestedMIDIDeviceDescription;
     NSMutableArray *pendingSysexMessages;
@@ -107,94 +123,111 @@ extern NSStringEncoding BXDirectStringEncoding;		//Used for file path strings th
 #pragma mark Properties
 
 //The delegate responsible for this emulator.
-@property (assign, nonatomic) id <BXEmulatorDelegate, BXEmulatorFileSystemDelegate, BXEmulatorAudioDelegate> delegate;
+@property (assign) id <BXEmulatorDelegate, BXEmulatorFileSystemDelegate, BXEmulatorAudioDelegate> delegate;
 
-@property (readonly, retain, nonatomic) BXVideoHandler *videoHandler;       //Our DOSBox video and rendering handler.
-@property (readonly, retain, nonatomic) BXEmulatedKeyboard *keyboard;       //Our emulated keyboard.
-@property (readonly, retain, nonatomic) BXEmulatedMouse *mouse;             //Our emulated mouse.
-@property (retain, nonatomic) id <BXEmulatedJoystick> joystick;             //Our emulated joystick. Initially empty.
+@property (readonly, retain) BXVideoHandler *videoHandler;       //Our DOSBox video and rendering handler.
+@property (readonly, retain) BXEmulatedKeyboard *keyboard;       //Our emulated keyboard.
+@property (readonly, retain) BXEmulatedMouse *mouse;             //Our emulated mouse.
+@property (retain) id <BXEmulatedJoystick> joystick;             //Our emulated joystick. Initially empty.
 
 //The OS X filesystem path to which the emulator should resolve relative local filesystem paths.
 //This is used by DOSBox commands like MOUNT, IMGMOUNT and CONFIG, and is directly equivalent
 //to the current process's working directory.
-@property (copy, nonatomic) NSString *basePath;
+@property (copy) NSString *basePath;
 
 #pragma mark -
 #pragma mark Introspecting emulation state
 
 //Whether the emulator is currently running/cancelled respectively.
 //Mirrors interface of NSOperation.
-@property (readonly, nonatomic, getter=isExecuting) BOOL executing;
-@property (readonly, nonatomic, getter=isCancelled) BOOL cancelled;
+@property (readonly, getter=isExecuting) BOOL executing;
+@property (readonly, getter=isCancelled) BOOL cancelled;
+
+//The thread on which the emulator was started via the -start method.
+@property (readonly) NSThread *emulationThread;
+
+//Whether the emulator is running on its own thread.
+@property (readonly, getter=isConcurrent) BOOL concurrent;
+
+//Whether the emulation is currently paused.
+@property (readonly, getter=isPaused) BOOL paused;
+
 
 //Whether DOSBox has finished initializing. Set to YES after all modules have been initialized
 //but before the DOS machine is started.
-@property (readonly, nonatomic, getter=isInitialized) BOOL initialized;
+@property (readonly, getter=isInitialized) BOOL initialized;
 
 //Whether DOSBox is currently running a process.
-@property (readonly, nonatomic) BOOL isRunningProcess;
+@property (readonly) BOOL isRunningProcess;
 
 //Returns whether the current process (if any) is an internal process.
-@property (readonly, nonatomic) BOOL processIsInternal;
+@property (readonly) BOOL processIsInternal;
 
 //Returns whether DOSBox is currently inside a batch script.
-@property (readonly, nonatomic) BOOL isInBatchScript;
+@property (readonly) BOOL isInBatchScript;
 
 //Returns whether DOSBox is waiting patiently at the DOS prompt doing nothing.
-@property (readonly, nonatomic) BOOL isAtPrompt;
+@property (readonly) BOOL isAtPrompt;
 
 //The name of the currently-executing DOSBox process. Will be nil if no process is running.
-@property (readonly, copy, nonatomic) NSString *processName;
+@property (readonly, copy) NSString *processName;
 
 //The DOS filesystem path of the currently-executing DOSBox process.
 //Will be nil if no process is running.
-@property (readonly, copy, nonatomic) NSString *processPath;
+@property (readonly, copy) NSString *processPath;
 
 //The local filesystem path of the currently-executing DOSBox process.
 //Will be nil if no process is running or if the process is on an image or DOSBox-internal drive.
-@property (readonly, copy, nonatomic) NSString *processLocalPath;
+@property (readonly, copy) NSString *processLocalPath;
 
 
 #pragma mark -
 #pragma mark Controlling emulation settings
 
 //The current fixed CPU speed.
-@property (assign, nonatomic) NSInteger fixedSpeed;
+@property (assign) NSInteger fixedSpeed;
 
 //Whether we are running at automatic maximum speed.
 @property (assign, getter=isAutoSpeed) BOOL autoSpeed;
 
+//Whether we are running in turbo mode (emulating as fast as possible.)
+@property (assign, getter=isTurboSpeed) BOOL turboSpeed;
+
 //The current CPU core mode.
-@property (assign, nonatomic) BXCoreMode coreMode;
+@property (assign) BXCoreMode coreMode;
 
 //The current gameport timing mode.
-@property (assign, nonatomic) BXGameportTimingMode gameportTimingMode;
+@property (assign) BXGameportTimingMode gameportTimingMode;
 
 //The game's level of joystick support:
 //none, simple (2-button, 2-axis) or full (4-button, 4-axis).
 //This is determined from the "joysticktype" conf setting,
 //and affects the choice of joystick types Boxer offers.
-@property (readonly, nonatomic) BXJoystickSupportLevel joystickSupport;
+@property (readonly) BXJoystickSupportLevel joystickSupport;
 
 //Whether the current program has indicated that it accepts joystick input,
 //by attempting to read from the gameport.
-@property (readonly, nonatomic) BOOL joystickActive;
+@property (readonly) BOOL joystickActive;
 
 //An array of queued command strings to execute on the DOS command line.
-@property (readonly, nonatomic) NSMutableArray *commandQueue;
+@property (readonly) NSMutableArray *commandQueue;
+
 
 //The properties requested by the game for what kind of MIDI playback
 //device we should use. See BXAudio for keys and constants.
-@property (retain, nonatomic) NSDictionary * requestedMIDIDeviceDescription;
+@property (retain) NSDictionary * requestedMIDIDeviceDescription;
 
 //The device to which we are currently sending MIDI signals.
 //One of MT32MIDIDevice, MIDISynth or externalMIDIDevice.
-@property (retain, nonatomic) id <BXMIDIDevice> activeMIDIDevice;
+@property (retain) id <BXMIDIDevice> activeMIDIDevice;
 
 //Whether to autodetect when a game is playing MT-32 music.
-//If YES, and the game detects MT-32 myusic, it will try to switch
-//to an MT-32-capable MIDI device.
-@property (assign, nonatomic) BOOL autodetectsMT32;
+//If YES, the game's MIDI output will be sniffed to see if it is using MT-32 music:
+//If so, we will request to switch to an MT-32-capable MIDI output device.
+@property (assign) BOOL autodetectsMT32;
+
+//The volume by which to scale all sound output, ranging from 0.0 to 1.0.
+@property (assign) float masterVolume;
 
 
 #pragma mark -
@@ -206,12 +239,6 @@ extern NSStringEncoding BXDirectStringEncoding;		//Used for file path strings th
 //Whether it is safe to launch a new emulator instance. Will be NO after an emulator has been opened
 //(and the memory state is too polluted to reuse.)
 + (BOOL) canLaunchEmulator;
-
-//An array of names of internal DOSBox processes.
-+ (NSSet *) internalProcessNames;
-
-//Returns whether the specified process name is a DOSBox internal process (according to internalProcessNames).
-+ (BOOL) isInternal: (NSString *)processName;
 
 //Returns the configuration values that reflect the specified settings.
 + (NSString *) configStringForFixedSpeed: (NSInteger)speed isAuto: (BOOL)isAutoSpeed;
@@ -228,14 +255,9 @@ extern NSStringEncoding BXDirectStringEncoding;		//Used for file path strings th
 //Stop emulation.
 - (void) cancel;
 
-
-#pragma mark -
-#pragma mark Responding to application state
-
-//Used to notify the emulator that it will be interrupted by UI events.
-//This will mute sound and otherwise prepare DOSBox for pausing.
-- (void) willPause;
-- (void) didResume;
+//Pause/resume the emulation. This will mute all sound and pause the DOSBox emulation loop.
+- (void) pause;
+- (void) resume;
 
 
 #pragma mark -

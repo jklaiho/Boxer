@@ -6,6 +6,7 @@
  */
 
 #import "BXEmulatorPrivate.h"
+#import "NSObject+BXPerformExtensions.h"
 
 #import <SDL/SDL.h>
 #import "cpu.h"
@@ -26,8 +27,9 @@ static BOOL hasStartedEmulator = NO;
 #pragma mark -
 #pragma mark Constants
 
-//Default name that DOSBox uses when there's no process running. Used by processName for string comparisons.
+//The name and path to the DOSBox shell. Used when determining the current process.
 NSString * const shellProcessName = @"DOSBOX";
+NSString * const shellProcessPath = @"Z:\\COMMAND.COM";
 
 
 //BXEmulatorDelegate constants, defined here for want of somewhere better to put them.
@@ -66,6 +68,9 @@ NSString * const BXDOSBoxErrorDomain = @"BXDOSBoxErrorDomain";
 //defined in dos_execute.cpp
 extern const char* RunningProgram;
 
+//defined in dosbox.cpp
+extern bool ticksLocked;
+
 #if (C_DYNAMIC_X86)
 //defined in core_dyn_x86.cpp
 void CPU_Core_Dyn_X86_Cache_Init(bool enable_cache);
@@ -84,12 +89,14 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 @synthesize processName, processPath, processLocalPath;
 @synthesize delegate;
 @synthesize videoHandler;
-@synthesize mouse, keyboard, joystick, joystickActive;
-@synthesize cancelled, executing, initialized;
+@synthesize mouse, keyboard;
+@synthesize cancelled, executing, initialized, paused;
 
 @synthesize commandQueue;
+@synthesize emulationThread;
 
 @synthesize activeMIDIDevice, requestedMIDIDeviceDescription, autodetectsMT32;
+@synthesize masterVolume;
 
 
 #pragma mark -
@@ -98,40 +105,13 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 //Returns the currently executing emulator instance, for DOSBox coalface functions to talk to.
 + (BXEmulator *) currentEmulator
 {
-	return currentEmulator;
+	return [[currentEmulator retain] autorelease];
 }
 
 //Whether it is safe to launch a new emulator instance.
 + (BOOL) canLaunchEmulator;
 {
 	return !hasStartedEmulator;
-}
-
-//Used by processIsInternal, to determine when we're running one of DOSBox's own builtin programs
-//TODO: generate this from DOSBox's builtin program manifest instead
-+ (NSSet *) internalProcessNames
-{
-	static NSSet *names = nil;
-	if (!names) names = [[NSSet alloc] initWithObjects:
-		@"IPXNET",
-		@"COMMAND",
-		@"KEYB",
-		@"IMGMOUNT",
-		@"BOOT",
-		@"INTRO",
-		@"RESCAN",
-		@"LOADFIX",
-		@"MEM",
-		@"MOUNT",
-		@"MIXER",
-		@"CONFIG",
-	nil];
-	return names;
-}
-
-+ (BOOL) isInternal: (NSString *)process
-{
-	return [[self internalProcessNames] containsObject: process];
 }
 
 + (NSString *) configStringForFixedSpeed: (NSInteger)speed
@@ -190,27 +170,29 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 		commandQueue            = [[NSMutableArray alloc] initWithCapacity: 4];
 		driveCache              = [[NSMutableDictionary alloc] initWithCapacity: DOS_DRIVES];
 		pendingSysexMessages    = [[NSMutableArray alloc] initWithCapacity: 4];
-		
-        [self setKeyboard: [[[BXEmulatedKeyboard alloc] init] autorelease]];
-        [self setMouse: [[[BXEmulatedMouse alloc] init] autorelease]];
         
-        [self setVideoHandler: [[[BXVideoHandler alloc] init] autorelease]];
-		[[self videoHandler] setEmulator: self];
-	}
+        self.masterVolume = 1.0f;
+		
+        self.keyboard = [[[BXEmulatedKeyboard alloc] init] autorelease];
+        self.mouse = [[[BXEmulatedMouse alloc] init] autorelease];
+        
+        self.videoHandler = [[[BXVideoHandler alloc] init] autorelease];
+		self.videoHandler.emulator = self;
+    }
 	return self;
 }
 
 - (void) dealloc
 {	
-	[self setProcessName: nil],	[processName release];
-	[self setActiveMIDIDevice: nil], [activeMIDIDevice release];
-    [self setRequestedMIDIDeviceDescription: nil], [requestedMIDIDeviceDescription release];
+    self.processName = nil;
+    self.activeMIDIDevice = nil;
+    self.requestedMIDIDeviceDescription = nil;
     
-    [self setKeyboard: nil], [keyboard release];
-    [self setMouse: nil], [mouse release];
-    [self setJoystick: nil], [joystick release];
-    [self setVideoHandler: nil], [videoHandler release];
-	
+    self.keyboard = nil;
+    self.mouse = nil;
+    self.joystick = nil;
+    self.videoHandler = nil;
+    
 	[driveCache release], driveCache = nil;
 	[commandQueue release], commandQueue = nil;
     [pendingSysexMessages release], pendingSysexMessages = nil;
@@ -226,7 +208,11 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 
 - (void) start
 {
-	if ([self isCancelled]) return;
+    NSAssert(!hasStartedEmulator, @"Emulation session started after one has already been started.");
+    
+	if (self.isCancelled) return;
+    
+    self.emulationThread = [NSThread currentThread];
 	
 	//Record ourselves as the current emulator instance for DOSBox to talk to
 	currentEmulator = self;
@@ -234,49 +220,75 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 	
 	[self _willStart];
 	
-	[self setExecuting: YES];
+	self.executing = YES;
 	
 	//Start DOSBox's main loop
 	[self _startDOSBox];
 	
-	[self setExecuting: NO];
+	self.executing = NO;
 	
-	if (currentEmulator == self) currentEmulator = nil;
+	if (currentEmulator == self)
+        currentEmulator = nil;
 	
 	[self _didFinish];
 }
 
 - (void) cancel
 {
-	if ([self isExecuting] && ![self isCancelled])
-	{
-		//Immediately kill audio output
-		[self willPause];
-		
-		//Break out of DOSBox's commandline input loop
-		[self discardShellInput];
-	
-		//Tells DOSBox to close the current shell at the end of the commandline input loop
-		DOS_Shell *shell = [self _currentShell];
-		if (shell) shell->exit = YES;
-	}
+    if (self.emulationThread && [NSThread currentThread] != self.emulationThread)
+    {
+        [self performSelector: _cmd onThread: self.emulationThread withObject: nil waitUntilDone: NO];
+    }
+    else
+    {
+        if (self.isExecuting && !self.isCancelled)
+        {
+            //Pause ourselves so that we immediately kill audio output
+            [self pause];
+            
+            //Break out of DOSBox's commandline input loop
+            [self discardShellInput];
+        
+            //Tells DOSBox to close the current shell at the end of the commandline input loop
+            DOS_Shell *shell = self._currentShell;
+            if (shell) shell->exit = YES;
+        }
 
-	[self setCancelled: YES];
+        self.cancelled = YES;
+    }
 }
+
++ (NSSet *) keyPathsForValuesAffectingConcurrent
+{
+    return [NSSet setWithObject: @"emulationThread"];
+}
+
+- (BOOL) isConcurrent
+{
+    return (self.emulationThread && self.emulationThread != [NSThread mainThread]);
+}
+
 
 - (NSString *) basePath
 {
-	NSFileManager *manager = [[NSFileManager alloc] init];
-	NSString *path = [manager currentDirectoryPath];
-	[manager release];
-	return path;
+    NSString *path;
+    @synchronized(self)
+    {
+        NSFileManager *manager = [[NSFileManager alloc] init];
+        path = [[manager currentDirectoryPath] retain];
+        [manager release];
+    }
+	return [path autorelease];
 }
 
 - (void) setBasePath: (NSString *)basePath
 {
-	NSFileManager *manager = [[NSFileManager alloc] init];
-	[manager changeCurrentDirectoryPath: basePath];
-	[manager release];
+    @synchronized(self)
+    {
+        NSFileManager *manager = [[NSFileManager alloc] init];
+        [manager changeCurrentDirectoryPath: basePath];
+        [manager release];
+    }
 }
 
 
@@ -286,21 +298,22 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 
 - (BOOL) isRunningProcess
 {
-	//Extra-safe - processPath is set earlier than processName
-	return [self isExecuting] && ([self processName] || [self processPath]);
+    return self.processPath && ![self.processPath isEqualToString: shellProcessPath];
 }
 
 - (BOOL) processIsInternal
 {
-	if (![self isRunningProcess]) return NO;
-	return [[self class] isInternal: [self processName]];
+	if (!self.isRunningProcess) return NO;
+    
+    //Count any programs on drive Z as being internal
+	return [self.processPath characterAtIndex: 0] == 'Z';
 }
 
 - (BOOL) isInBatchScript
 {
-	if ([self isExecuting])
+	if (self.isExecuting)
 	{
-		DOS_Shell *shell = [self _currentShell];
+		DOS_Shell *shell = self._currentShell;
 		return (shell && shell->bf);		
 	}
 	return NO;
@@ -308,7 +321,13 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 
 - (BOOL) isAtPrompt
 {
-	return [self isExecuting] && [self isInitialized] && ![self isRunningProcess] && ![self isInBatchScript];
+    if (!self.isExecuting) return NO;
+    
+    if (!self.isInitialized) return NO;
+    if (self.isInBatchScript) return NO;
+    if (self.isRunningProcess) return NO;
+    
+    return YES;
 }
 
 
@@ -348,7 +367,9 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 	BOOL autoSpeed = NO;
 	if ([self isExecuting])
 	{
-		autoSpeed = (CPU_CycleAutoAdjust == BXSpeedAuto);
+        //While in turbo mode, report the value we had before we entered turbo.
+        if (self.isTurboSpeed) autoSpeed = wasAutoSpeed;
+        else autoSpeed = (CPU_CycleAutoAdjust == BXSpeedAuto);
 	}
 	return autoSpeed;
 }
@@ -357,16 +378,64 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 {
 	if ([self isExecuting] && [self isAutoSpeed] != autoSpeed)
 	{
-		//Be a good boy and record/restore the old cycles setting
-		if (autoSpeed)	CPU_OldCycleMax = CPU_CycleMax;
-		else			CPU_CycleMax = CPU_OldCycleMax;
-		
-		//Always force the usage percentage to 100
-		CPU_CyclePercUsed = 100;
-		
-		CPU_CycleAutoAdjust = (autoSpeed) ? BXSpeedAuto : BXSpeedFixed;
+        //While we're in turbo, don't change the auto-speed setting directly;
+        //instead, set the value we'll return to when we come out of turbo.
+        if (self.isTurboSpeed)
+        {
+            wasAutoSpeed = autoSpeed;
+        }
+        else
+        {
+            //Be a good boy and record/restore the old cycles setting
+            if (autoSpeed)	CPU_OldCycleMax = CPU_CycleMax;
+            else			CPU_CycleMax = CPU_OldCycleMax;
+            
+            //Always force the usage percentage to 100
+            CPU_CyclePercUsed = 100;
+            
+            CPU_CycleAutoAdjust = (autoSpeed) ? BXSpeedAuto : BXSpeedFixed;
+        }
 	}
 }
+
+- (BOOL) isTurboSpeed
+{
+    return ticksLocked;
+}
+
+- (void) setTurboSpeed: (BOOL)turboSpeed
+{
+    if (turboSpeed != self.isTurboSpeed)
+    {
+        if (turboSpeed)
+        {
+            ticksLocked = YES;
+            
+            wasAutoSpeed = (CPU_CycleAutoAdjust == BXSpeedAuto);
+            //Suppress auto-speed temporarily
+            if (wasAutoSpeed)
+            {
+                CPU_CycleAutoAdjust = NO;
+                //Hurray, magic numbers!
+                CPU_CycleMax /= 3;
+                if (CPU_CycleMax < 1000) CPU_CycleMax = 1000;
+            }
+        }
+        else
+        {
+            ticksLocked = NO;
+            
+            //Restore the previous auto-speed value.
+            if (wasAutoSpeed)
+            {
+                wasAutoSpeed = NO;
+                CPU_CycleAutoAdjust = BXSpeedAuto;
+                //TODO: should we set this using setAutoSpeed:?
+            }
+        }
+    }
+}
+
 
 - (BXCoreMode) coreMode
 {
@@ -435,25 +504,41 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 #pragma mark -
 #pragma mark Handling changes to application focus
 
-//These methods are only necessary while we are running in single-threaded mode,
-//and will be the first against the wall when the multiprocess revolution comes.
-- (void) willPause
+- (void) pause
 {
-	if ([self isExecuting] && !isInterrupted)
+	if (!self.isPaused)
 	{
-		SDL_PauseAudio(YES);
-        [[self activeMIDIDevice] pause];
-		isInterrupted = YES;
+        if (self.emulationThread && [NSThread currentThread] != self.emulationThread)
+        {
+            [self performSelector: _cmd onThread: self.emulationThread withObject: nil waitUntilDone: NO];
+        }
+        else
+        {
+            @synchronized(self)
+            {
+                self.paused = YES;
+                [self _suspendAudio];
+            }
+        }
 	}
 }
 
-- (void) didResume
+- (void) resume
 {	
-	if ([self isExecuting] && isInterrupted)
-	{
-		SDL_PauseAudio(NO);
-        [[self activeMIDIDevice] resume];
-		isInterrupted = NO;
+	if (self.isPaused)
+    {
+        if (self.emulationThread && [NSThread currentThread] != self.emulationThread)
+        {
+            [self performSelector: _cmd onThread: self.emulationThread withObject: nil waitUntilDone: NO];
+        }
+        else
+        {
+            @synchronized(self)
+            {
+                self.paused = NO;
+                [self _resumeAudio];
+            }
+        }
 	}
 }
 
@@ -468,22 +553,33 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 
 - (void) setGameportTimingMode: (BXGameportTimingMode)mode
 {
-	if (gameport_timed != mode)
-	{
-		gameport_timed = mode;
-		[[self joystick] clearInput];
-	}
+    @synchronized(self)
+    {
+        if (gameport_timed != mode)
+        {
+            gameport_timed = mode;
+            [self.joystick clearInput];
+        }
+    }
+}
+
+- (BOOL) joystickActive
+{
+    return joystickActive;
 }
 
 - (void) setJoystickActive: (BOOL)flag
 {
-    //TWEAK: disregard attempts to access the gameport when there's nothing connected to it.
-    //This way, the joystickActive flag indicates to Boxer whether the game is *still* listening
-    //to input, rather than whether the game looked for a joystick that wasn't there at startup
-    //and then gave up.
-    if ([self joystick] || !flag)
+    @synchronized(self)
     {
-        joystickActive = flag;
+        //TWEAK: disregard attempts to access the gameport when there's nothing connected to it.
+        //This way, the joystickActive flag indicates to Boxer whether the game is *still* listening
+        //to input, rather than whether the game looked for a joystick that wasn't there at startup
+        //and then gave up.
+        if (self.joystick || !flag)
+        {
+            joystickActive = flag;
+        }
     }
 }
 
@@ -502,23 +598,35 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 	}
 }
 
-- (void) setJoystick: (id<BXEmulatedJoystick>)newJoystick
+- (id <BXEmulatedJoystick>) joystick
 {
-    if ([self joystick] != newJoystick)
+    @synchronized(self)
     {
-        //Detach the existing joystick...
-        if (joystick)
+        [joystick retain];
+    }
+    return [joystick autorelease];
+}
+
+- (void) setJoystick: (id <BXEmulatedJoystick>)newJoystick
+{
+    @synchronized(self)
+    {
+        if (self.joystick != newJoystick)
         {
-            [joystick willDisconnect];
-            [joystick release];
-        }
-        
-        joystick = [newJoystick retain];
-        
-        //...and prepare the new one
-        if (joystick)
-        {
-            [joystick didConnect];
+            //Detach the existing joystick...
+            if (joystick)
+            {
+                [joystick willDisconnect];
+                [joystick release];
+            }
+            
+            joystick = [newJoystick retain];
+            
+            //...and prepare the new one
+            if (joystick)
+            {
+                [joystick didConnect];
+            }
         }
     }
 }
@@ -554,8 +662,8 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 	}
 	
 	//Joystick class valid but not supported by the current session
-	if ([self joystickSupport] == BXNoJoystickSupport || 
-		([self joystickSupport] == BXJoystickSupportSimple && [joystickClass requiresFullJoystickSupport]))
+	if (self.joystickSupport == BXNoJoystickSupport || 
+		(self.joystickSupport == BXJoystickSupportSimple && [joystickClass requiresFullJoystickSupport]))
 	{
 		if (outError)
 		{
@@ -599,45 +707,76 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 			  delegateSelector: (SEL)selector
 					  userInfo: (NSDictionary *)userInfo
 {
-	NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-	NSNotification *notification = [NSNotification notificationWithName: name
-																 object: self
-															   userInfo: userInfo];
-	
-	if ([[self delegate] respondsToSelector: selector])
-		[[self delegate] performSelector: selector withObject: notification];
-	
-	[center postNotification: notification];
+    //Always post notifications on the main thread.
+    if (![NSThread isMainThread])
+    {
+        [self performSelectorOnMainThread: _cmd waitUntilDone: NO withValues: &name, &selector, &userInfo];
+    }
+    else
+    {
+        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+        NSNotification *notification = [NSNotification notificationWithName: name
+                                                                     object: self
+                                                                   userInfo: userInfo];
+        
+        if ([self.delegate respondsToSelector: selector])
+            [self.delegate performSelector: selector withObject: notification];
+        
+        [center postNotification: notification];
+    }
 }
 
 
 #pragma mark -
 #pragma mark Synchronizing emulation state
 
+//Dispatch KVC notifications on the main thread
+- (void) willChangeValueForKey: (NSString *)key
+{
+    if (![NSThread isMainThread])
+        [self performSelectorOnMainThread: _cmd withObject: key waitUntilDone: NO];
+    else
+        [super willChangeValueForKey: key];
+}
+
+- (void) didChangeValueForKey: (NSString *)key
+{
+    if (![NSThread isMainThread])
+        [self performSelectorOnMainThread: _cmd withObject: key waitUntilDone: NO];
+    else
+        [super didChangeValueForKey: key];
+}
+
 //Called by coalface functions to notify Boxer that the emulation state may have changed behind its back
 - (void) _didChangeEmulationState
 {
-	if ([self isExecuting])
-	{
-		[self willChangeValueForKey: @"fixedSpeed"];
-		[self willChangeValueForKey: @"autoSpeed"];
-		[self willChangeValueForKey: @"frameskip"];
-		[self willChangeValueForKey: @"coreMode"];
-		
-		[self didChangeValueForKey: @"fixedSpeed"];
-		[self didChangeValueForKey: @"autoSpeed"];
-		[self didChangeValueForKey: @"frameskip"];
-		[self didChangeValueForKey: @"coreMode"];
-		
-		NSString *newProcessName = [NSString stringWithCString: RunningProgram encoding: BXDirectStringEncoding];
-		if ([newProcessName isEqualToString: shellProcessName]) newProcessName = nil;
-		[self setProcessName: newProcessName];
-		
-		//Let the delegate know that the emulation state has changed behind its back, so it can re-check CPU settings
-		[self _postNotificationName: BXEmulatorDidChangeEmulationStateNotification
-				   delegateSelector: @selector(emulatorDidChangeEmulationState:)
-						   userInfo: nil];
-	}
+    if (![NSThread isMainThread])
+    {
+        [self performSelectorOnMainThread: _cmd withObject: nil waitUntilDone: NO];
+    }
+    else
+    {
+        [self willChangeValueForKey: @"fixedSpeed"];
+        [self willChangeValueForKey: @"autoSpeed"];
+        [self willChangeValueForKey: @"frameskip"];
+        [self willChangeValueForKey: @"coreMode"];
+        
+        [self didChangeValueForKey: @"fixedSpeed"];
+        [self didChangeValueForKey: @"autoSpeed"];
+        [self didChangeValueForKey: @"frameskip"];
+        [self didChangeValueForKey: @"coreMode"];
+        
+        NSString *newProcessName = [NSString stringWithCString: RunningProgram
+                                                      encoding: BXDirectStringEncoding];
+        
+        if ([newProcessName isEqualToString: shellProcessName]) newProcessName = nil;
+        self.processName = newProcessName;
+        
+        //Let the delegate know that the emulation state has changed behind its back, so it can re-check CPU settings
+        [self _postNotificationName: BXEmulatorDidChangeEmulationStateNotification
+                   delegateSelector: @selector(emulatorDidChangeEmulationState:)
+                           userInfo: nil];
+    }
 }
 
 - (void) _willStart
@@ -649,7 +788,7 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 
 - (void) _didInitialize
 {
-	[self setInitialized: YES];
+	self.initialized = YES;
 	
 	//These flags will only change during initialization
 	[self willChangeValueForKey: @"gameportTimingMode"];
@@ -671,12 +810,32 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 					   userInfo: nil];
 }
 
+- (void) _didFinishFrame: (BXFrameBuffer *)frame
+{
+    [self.delegate emulator: self didFinishFrame: frame];
+}
+                           
+
 #pragma mark -
 #pragma mark Runloop handling
 
 - (void) _processEvents
 {
-    [[self delegate] processEventsForEmulator: self];
+    //Let our delegate process events for us if we don't have our own thread
+    if (!self.isConcurrent)
+    {
+        [self.delegate processEventsForEmulator: self];
+    }
+    else
+    {
+        NSDate *untilDate = self.isPaused ? [NSDate distantFuture] : [NSDate distantPast];
+        
+        while ([[NSRunLoop currentRunLoop] runMode: NSDefaultRunLoopMode beforeDate: untilDate])
+        {
+            if (self.isCancelled) break;
+            if (!self.isPaused) break;
+        }
+    }
 }
 
 - (BOOL) _runLoopShouldContinue
@@ -686,11 +845,11 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
 	//TWEAK: it's only safe to break out once initialization is done, since some
 	//of DOSBox's initialization routines rely on running tasks on the run loop
 	//and may crash if they fail to complete.
-	if ([self isCancelled] && [self isInitialized]) return NO;
+	if (self.isCancelled && self.isInitialized) return NO;
 
 	//If we have a command of our own waiting at the command prompt,
     //then break out of DOSBox's stdin input loop
-	if ([[self commandQueue] count] && [self isAtPrompt]) return NO;
+	if (self.commandQueue.count > 0 && self.isAtPrompt) return NO;
 	
 	return YES;
 }
@@ -700,12 +859,12 @@ void CPU_Core_Dynrec_Cache_Init(bool enable_cache);
     //Create an autorelease pool for this iteration of the runloop
     if (!poolForRunLoop) poolForRunLoop = [[NSAutoreleasePool alloc] init];
     
-	[[self delegate] emulatorWillStartRunLoop: self];
+	[self.delegate emulatorWillStartRunLoop: self];
 }
 
 - (void) _runLoopDidFinish
 {
-	[[self delegate] emulatorDidFinishRunLoop: self];
+	[self.delegate emulatorDidFinishRunLoop: self];
     
     if (poolForRunLoop)
     {

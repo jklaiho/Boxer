@@ -121,6 +121,12 @@ enum
 - (IBAction) incrementSpeed: (id)sender;	
 - (IBAction) decrementSpeed: (id)sender;
 
+//Run the CPU in turbo mode.
+- (IBAction) toggleFastForward: (id)sender;
+- (IBAction) fastForward: (id)sender;
+- (IBAction) releaseFastForward: (id)sender;
+
+
 //Caps the speed within minimum and maximum limits
 - (BOOL) validateCPUSpeed: (id *)ioValue error: (NSError **)outError;
 
@@ -130,14 +136,12 @@ enum
 //Snaps the speed to set increments, and switches to auto speed above the maximum speed.
 - (BOOL) validateSliderSpeed: (id *)ioValue error: (NSError **)outError;
 
-//Paste data from the clipboard into the DOS session. Currently disabled.
+//Paste data from the clipboard into the DOS session.
 - (IBAction) paste: (id)sender;
 
+//Whether we can accept pasted data from the specified pasteboard.
+- (BOOL) canPasteFromPasteboard: (NSPasteboard *)pboard;
 
-//Display the relevant panels of the Inspector.
-- (IBAction) showGamePanel:		(id)sender;
-- (IBAction) showCPUPanel:		(id)sender;
-- (IBAction) showDrivesPanel:	(id)sender;
-- (IBAction) showMousePanel:	(id)sender;
-
+//Save a screenshot to the desktop.
+- (IBAction) saveScreenshot: (id)sender;
 @end

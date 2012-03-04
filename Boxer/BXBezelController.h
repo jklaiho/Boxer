@@ -46,8 +46,11 @@ enum {
     NSView *joystickIgnoredBezel;
     NSView *CPUSpeedBezel;
     NSView *throttleBezel;
+    NSView *volumeBezel;
     NSView *pauseBezel;
     NSView *playBezel;
+    NSView *fastForwardBezel;
+    NSView *screenshotBezel;
     NSView *MT32MessageBezel;
     NSView *MT32MissingBezel;
     NSView *numpadActiveBezel;
@@ -79,14 +82,21 @@ enum {
 //The bezel view used for flightstick throttle notifications.
 @property (retain, nonatomic) IBOutlet NSView *throttleBezel;
 
+//The bezel view used for volume notifications.
+@property (retain, nonatomic) IBOutlet NSView *volumeBezel;
+
 //The bezel view used for MT-32 LCD messages.
 @property (retain, nonatomic) IBOutlet NSView *MT32MessageBezel;
 //The bezel view used for notifying the user that they need an MT-32 to hear proper music.
 @property (retain, nonatomic) IBOutlet NSView *MT32MissingBezel;
 
-//Pause/play bezel views.
+//Screenshot bezel views.
+@property (retain, nonatomic) IBOutlet NSView *screenshotBezel;
+
+//Pause/play/fast-forward bezel views.
 @property (retain, nonatomic) IBOutlet NSView *pauseBezel;
 @property (retain, nonatomic) IBOutlet NSView *playBezel;
+@property (retain, nonatomic) IBOutlet NSView *fastForwardBezel;
 
 //Numpad simulation bezels.
 @property (retain, nonatomic) IBOutlet NSView *numpadActiveBezel;
@@ -112,8 +122,12 @@ enum {
 #pragma mark Methods
 
 //Whether to show or suppress drive notifications.
-//Currently this always returns YES.
+//This will return NO if the Drives Inspector panel is open.
 - (BOOL) shouldShowDriveNotifications;
+
+//Whether to show volume notifications.
+//This will return NO if the window's statusbar volume control is currently visible.
+- (BOOL) shouldShowVolumeNotifications;
 
 - (void) showDriveAddedBezelForDrive: (BXDrive *)drive;
 - (void) showDriveRemovedBezelForDrive: (BXDrive *)drive;
@@ -124,6 +138,9 @@ enum {
 
 - (void) showPauseBezel;
 - (void) showPlayBezel;
+- (void) showFastForwardBezel;
+
+- (void) showScreenshotBezel;
 
 - (void) showNumpadActiveBezel;
 - (void) showNumpadInactiveBezel;
@@ -140,6 +157,7 @@ enum {
 - (void) showCPUSpeedBezelForSpeed: (NSInteger)cpuSpeed;
 - (void) showThrottleBezelForValue: (float)throttleValue;
 
+- (void) showVolumeBezelForVolume: (float)volume;
 
 - (void) showBezel: (NSView *)bezel
        forDuration: (NSTimeInterval)duration

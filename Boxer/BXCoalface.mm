@@ -256,11 +256,11 @@ void boxer_didRemoveLocalFile(const char *path, DOS_Drive *dosboxDrive)
 #pragma mark -
 #pragma mark Input-related functions
 
-//Returns the DOSBox keyboard code that most closely corresponds to the current OS X keyboard layout
-const char * boxer_currentDOSKeyboardLayout()
+const char * boxer_preferredKeyboardLayout()
 {
 	BXEmulator *emulator = [BXEmulator currentEmulator];
-	NSString *layoutCode = [[emulator keyboard] activeLayout];
+	NSString *layoutCode = emulator.keyboard.preferredLayout;
+    
     if (layoutCode)
         return [layoutCode cStringUsingEncoding: BXDirectStringEncoding];
     else return NULL;
@@ -284,19 +284,6 @@ void boxer_mouseMovedToPoint(float x, float y)
 	BXEmulator *emulator = [BXEmulator currentEmulator];
 	[[emulator mouse] setPosition: point];
 }
-
-bool boxer_capsLockEnabled()
-{
-	BXEmulator *emulator = [BXEmulator currentEmulator];
-	return [[emulator keyboard] capsLockEnabled];
-}
-
-bool boxer_numLockEnabled()
-{
-	BXEmulator *emulator = [BXEmulator currentEmulator];
-	return [[emulator keyboard] numLockEnabled];
-}
-
 
 #pragma mark -
 #pragma mark Helper functions

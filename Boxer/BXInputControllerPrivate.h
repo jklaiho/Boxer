@@ -62,6 +62,16 @@
 #pragma mark -
 #pragma mark Methods
 
+//Called when the active keyboard input source changes in OS X.
+//Used to sync the DOS keyboard layout accordingly.
+void _inputSourceChanged(CFNotificationCenterRef center,
+                         void *observer,
+                         CFStringRef name,
+                         const void *object,
+                         CFDictionaryRef userInfo);
+
+//Resynchronises the current simulated mouse button state whenever the current modifier flags change.
+- (void) _syncSimulatedMouseButtons: (NSUInteger)currentModifiers;
 
 //Returns whether we should have control of the mouse cursor state.
 //This is true if the mouse is within the view, the window is key,
@@ -120,6 +130,9 @@
 
 
 @interface BXInputController (BXKeyboardInputInternals)
+
+//Resynchronises the DOS keyboard layout with the current OS X text-input source.
+- (void) _syncKeyboardLayout;
 
 //Resynchronises the current state of the Shift, Ctrl, Alt, CapsLock etc.
 //key, which are represented by event modifier flags.

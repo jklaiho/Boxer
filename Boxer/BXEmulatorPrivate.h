@@ -21,6 +21,7 @@
 #import "BXEmulatedJoystick.h"
 #import "BXEmulatedMouse.h"
 #import "BXAudioSource.h"
+#import "BXCoalfaceAudio.h"
 
 
 #pragma mark -
@@ -47,7 +48,6 @@ typedef struct BXDriveGeometry {
 
 //Raw disk images larger than this size in bytes will be treated as hard disks
 #define BXFloppyImageSizeCutoff 2880 * 1024
-
 
 
 #pragma mark -
@@ -88,18 +88,21 @@ enum {
 @interface BXEmulator()
 
 //Overridden to add setters for internal use
-@property (readwrite, nonatomic, getter=isExecuting) BOOL executing;
-@property (readwrite, nonatomic, getter=isCancelled) BOOL cancelled;
-@property (readwrite, nonatomic, getter=isInitialized) BOOL initialized;
-@property (readwrite, copy, nonatomic) NSString *processName;
-@property (readwrite, copy, nonatomic) NSString *processPath;
-@property (readwrite, copy, nonatomic) NSString *processLocalPath;
+@property (readwrite) NSThread *emulationThread;
+@property (readwrite, getter=isExecuting) BOOL executing;
+@property (readwrite, getter=isCancelled) BOOL cancelled;
+@property (readwrite, getter=isInitialized) BOOL initialized;
+@property (readwrite, getter=isPaused) BOOL paused;
+@property (readwrite, copy) NSString *processName;
+@property (readwrite, copy) NSString *processPath;
+@property (readwrite, copy) NSString *processLocalPath;
 
-@property (readwrite, nonatomic) BOOL joystickActive;
+@property (readwrite) BOOL joystickActive;
 
-@property (readwrite, retain, nonatomic) BXVideoHandler *videoHandler;
-@property (readwrite, retain, nonatomic) BXEmulatedKeyboard *keyboard;
-@property (readwrite, retain, nonatomic) BXEmulatedMouse *mouse;
+
+@property (readwrite, retain) BXVideoHandler *videoHandler;
+@property (readwrite, retain) BXEmulatedKeyboard *keyboard;
+@property (readwrite, retain) BXEmulatedMouse *mouse;
 
 @end
 
@@ -136,6 +139,10 @@ enum {
 - (void) _willStart;
 - (void) _didInitialize;
 - (void) _didFinish;
+
+//Called by videoHandler when each new frame is ready.
+//Passes the frame on to the emulator's delegate.
+- (void) _didFinishFrame: (BXFrameBuffer *)frame;
 
 @end
 
@@ -288,6 +295,11 @@ enum {
 
 @interface BXEmulator (BXAudioInternals)
 
+//Pause/resume audio playback. Called during pause and resume.
+- (void) _suspendAudio;
+- (void) _resumeAudio;
+
+
 //Returns the file path for the specified MT-32 ROM,
 //or nil if no such ROM is available. This calls
 //one of the delegate methods pathToMT32ControlROMForEmulator:
@@ -324,6 +336,8 @@ enum {
 //time it is needed.
 - (void) _attachRequestedMIDIDeviceIfNeeded;
 
+//Synchronizes volumes with the DOSBox mixer and MIDI devices whenever the master volume changes.
+- (void) _syncVolume;
 
 //Returns the DOSBox channel used for MIDI mixing, or NULL if none is available.
 - (MixerChannel *) _MIDIMixerChannel;

@@ -437,7 +437,7 @@ NSString * const BXViewDidLiveResizeNotification	= @"BXViewDidLiveResizeNotifica
 
 - (NSSize) viewportSize
 {
-	return [renderingView viewportSize];
+	return [renderingView viewportRect].size;
 }
 
 - (NSSize) maxFrameSize
@@ -451,6 +451,23 @@ NSString * const BXViewDidLiveResizeNotification	= @"BXViewDidLiveResizeNotifica
 {
     if ([[self window] isFullScreen]) return renderingViewSizeBeforeFullScreen;
     else return [[self window] actualContentViewSize];
+}
+
+- (NSImage *) screenshotOfCurrentFrame
+{
+    NSImage *screenshot = nil;
+    
+    if ([renderingView currentFrame])
+    {
+        NSRect visibleRect = renderingView.viewportRect;
+        NSBitmapImageRep *rep = [renderingView bitmapImageRepForCachingDisplayInRect: visibleRect];
+        [renderingView cacheDisplayInRect: visibleRect toBitmapImageRep: rep];
+        
+        screenshot = [[NSImage alloc] init];
+        [screenshot addRepresentation: rep];
+    }
+    
+    return [screenshot autorelease];
 }
 
 
@@ -554,7 +571,6 @@ NSString * const BXViewDidLiveResizeNotification	= @"BXViewDidLiveResizeNotifica
 
 - (void) windowWillEnterFullScreen: (NSNotification *)notification
 {
-    
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
 	[center postNotificationName: BXSessionWillEnterFullScreenNotification object: [self document]];
     
@@ -604,8 +620,15 @@ NSString * const BXViewDidLiveResizeNotification	= @"BXViewDidLiveResizeNotifica
     //Delete the old autosaved size before restoring the original
     //autosave name. (This prevents Cocoa from resizing the window
     //to match the old saved size as soon as we restore the autosave name.)
-    [NSWindow removeFrameUsingName: [self autosaveNameBeforeFullScreen]];
-    [[self window] setFrameAutosaveName: [self autosaveNameBeforeFullScreen]];
+    
+    //FIX: this method will get called in Lion if the window closes while
+    //in fullscreen, in which case the frame will still be the fullscreen frame.
+    //Needless to say, we don't want to persist that frame in the user defaults.
+    if (!windowIsClosing)
+    {
+        [NSWindow removeFrameUsingName: [self autosaveNameBeforeFullScreen]];
+        [[self window] setFrameAutosaveName: [self autosaveNameBeforeFullScreen]];
+    }
     
     //Force the renderer to redraw after the resize
     [self _cleanUpAfterResize];
@@ -638,6 +661,11 @@ NSString * const BXViewDidLiveResizeNotification	= @"BXViewDidLiveResizeNotifica
     newFrame = [window fullyConstrainFrameRect: newFrame toScreen: [window screen]];
     newFrame = NSIntegralRect(newFrame);
     return newFrame;
+}
+
+- (void) windowWillClose: (NSNotification *)notification
+{
+    windowIsClosing = YES;
 }
 
 

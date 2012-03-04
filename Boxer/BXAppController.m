@@ -9,6 +9,7 @@
 #import "BXAppController+BXSupportFiles.h"
 #import "BXAppController+BXGamesFolder.h"
 #import "BXAppController+BXApplicationModes.h"
+#import "BXAppController+BXHotKeys.h"
 
 #import "BXAboutController.h"
 #import "BXInspectorController.h"
@@ -21,6 +22,7 @@
 #import "BXImportSession.h"
 #import "BXEmulator.h"
 #import "BXMIDIDeviceMonitor.h"
+#import "BXKeyboardEventTap.h"
 
 #import "BXValueTransformers.h"
 #import "NSString+BXPaths.h"
@@ -33,6 +35,9 @@ NSString * const BXNewSessionParam = @"--openNewSession";
 NSString * const BXShowImportPanelParam = @"--showImportPanel";
 NSString * const BXImportURLParam = @"--importURL ";
 NSString * const BXActivateOnLaunchParam = @"--activateOnLaunch";
+
+#define BXMasterVolumeNumIncrements 12.0f
+#define BXMasterVolumeIncrement (1.0f / BXMasterVolumeNumIncrements)
 
 @interface BXAppController ()
 
@@ -243,12 +248,23 @@ NSString * const BXActivateOnLaunchParam = @"--activateOnLaunch";
 
 - (void) applicationWillFinishLaunching: (NSNotification *)notification
 {
+    //Set up our keyboard event tap
+    self.hotkeySuppressionTap = [[[BXKeyboardEventTap alloc] init] autorelease];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    
+    self.hotkeySuppressionTap.delegate = self;
+    [self.hotkeySuppressionTap bind: @"enabled"
+                           toObject: defaults
+                        withKeyPath: @"suppressSystemHotkeys"
+                            options: nil];
+    
+    
     //Start scanning for MIDI devices now
-    [self setMIDIDeviceMonitor: [[[BXMIDIDeviceMonitor alloc] init] autorelease]];
-    [[self MIDIDeviceMonitor] start];
+    self.MIDIDeviceMonitor = [[[BXMIDIDeviceMonitor alloc] init] autorelease];
+    [self.MIDIDeviceMonitor start];
     
     //Check if we have any games folder, and if not (and we're allowed to create one automatically)
-    //then do so now
+    //then create one now
     if (![self gamesFolderPath] && ![self gamesFolderChosen] && ![[NSUserDefaults standardUserDefaults] boolForKey: @"showFirstRunPanel"])
     {
         NSString *defaultPath = [[self class] preferredGamesFolderPath];
@@ -738,6 +754,14 @@ NSString * const BXActivateOnLaunchParam = @"--activateOnLaunch";
 	}
 }
 
+//These are passthroughs for when BXInspectorController isn't in the responder chain
+- (IBAction) showGamePanel:		(id)sender	{ [[BXInspectorController controller] showGamePanel: sender]; }
+- (IBAction) showCPUPanel:		(id)sender	{ [[BXInspectorController controller] showCPUPanel: sender]; }
+- (IBAction) showDrivesPanel:	(id)sender	{ [[BXInspectorController controller] showDrivesPanel: sender]; }
+- (IBAction) showMousePanel:	(id)sender	{ [[BXInspectorController controller] showMousePanel: sender]; }
+
+
+
 - (IBAction) showWebsite:			(id)sender	{ [self openURLFromKey: @"WebsiteURL"]; }
 - (IBAction) showDonationPage:		(id)sender	{ [self openURLFromKey: @"DonationURL"]; }
 - (IBAction) showBugReportPage:		(id)sender	{ [self openURLFromKey: @"BugReportURL"]; }
@@ -771,7 +795,14 @@ NSString * const BXActivateOnLaunchParam = @"--activateOnLaunch";
 	
 	//Don't allow the Inspector panel to be shown if there's no active session.
 	if (theAction == @selector(toggleInspectorPanel:) ||
-		theAction == @selector(orderFrontInspectorPanel:))	return [[self currentSession] isEmulating];
+		theAction == @selector(orderFrontInspectorPanel:) ||
+        theAction == @selector(showGamePanel:) ||
+        theAction == @selector(showCPUPanel:) ||
+        theAction == @selector(showDrivesPanel:) ||
+        theAction == @selector(showMousePanel:))
+    {
+        return [[self currentSession] isEmulating];
+    }
 	
 	//Don't allow game imports or the games folder to be opened if no games folder has been set yet.
 	if (theAction == @selector(revealGamesFolder:) ||
@@ -877,7 +908,7 @@ NSString * const BXActivateOnLaunchParam = @"--activateOnLaunch";
 
 
 #pragma mark -
-#pragma mark Miscellaneous UI-related methods
+#pragma mark Sound-related methods
 
 
 //We retrieve OS X's own UI sound setting from their domain
@@ -893,14 +924,115 @@ NSString * const BXActivateOnLaunchParam = @"--activateOnLaunch";
 }
 
 //If UI sounds are enabled, play the sound matching the specified name at the specified volume
-- (void) playUISoundWithName: (NSString *)soundName atVolume: (float)volume
+- (void) playUISoundWithName: (NSString *)soundName atVolume: (float)volume afterDelay: (NSTimeInterval)delay
 {
 	if ([self shouldPlayUISounds])
 	{
 		NSSound *theSound = [NSSound soundNamed: soundName];
-		[theSound setVolume: volume];
-		[theSound play];
+		[theSound setVolume: (volume * self.effectiveVolume)];
+        
+        if (delay > 0)
+        {
+            [theSound performSelector: @selector(play) withObject: nil afterDelay: delay];
+        }
+        else
+        {
+            [theSound play];
+        }
 	}
+}
+
+- (void) playUISoundWithName: (NSString *)soundName atVolume: (float)volume
+{
+    [self playUISoundWithName: soundName
+                     atVolume: volume
+                   afterDelay: 0];
+}
+
+- (BOOL) muted
+{
+    return [[NSUserDefaults standardUserDefaults] boolForKey: @"muted"];
+}
+
+- (void) setMuted: (BOOL)muted
+{
+    [[NSUserDefaults standardUserDefaults] setBool: muted forKey: @"muted"];
+}
+
+- (float) masterVolume
+{
+    return [[NSUserDefaults standardUserDefaults] floatForKey: @"masterVolume"];
+}
+
+- (void) setMasterVolume: (float)volume
+{
+    volume = MAX(0.0f, volume);
+    volume = MIN(volume, 1.0f);
+    [[NSUserDefaults standardUserDefaults] setFloat: volume forKey: @"masterVolume"];
+}
+
++ (NSSet *) keyPathsForValuesAffectingEffectiveVolume
+{
+    return [NSSet setWithObjects: @"muted", @"masterVolume", nil];
+}
+
+- (float) effectiveVolume
+{
+    if (self.muted) return 0.0;
+    else return self.masterVolume;
+}
+
+- (void) setEffectiveVolume: (float)volume
+{
+    volume = MAX(0.0f, volume);
+    volume = MIN(volume, 1.0f);
+    
+    //Mute/unmute the volume at the same time as setting it, when modifying it from here. 
+    self.muted = (volume == 0);
+    self.masterVolume = volume;
+}
+
+- (IBAction) toggleMuted: (id)sender
+{
+    self.muted = !self.muted;
+    [[BXBezelController controller] showVolumeBezelForVolume: self.effectiveVolume];
+}
+
+- (IBAction) minimizeVolume: (id)sender
+{
+    self.effectiveVolume = 0.0f;
+    [[BXBezelController controller] showVolumeBezelForVolume: self.effectiveVolume];
+}
+
+- (IBAction) maximizeVolume: (id)sender
+{
+    self.effectiveVolume = 1.0f;
+    [[BXBezelController controller] showVolumeBezelForVolume: self.effectiveVolume];
+}
+
+- (IBAction) incrementVolume: (id)sender
+{
+    self.muted = NO;
+    if (self.masterVolume < 1.0f)
+    {
+        //Round the volume to the nearest increment after incrementing.
+        float incrementedVolume = self.masterVolume + BXMasterVolumeIncrement;
+        self.masterVolume = roundf(incrementedVolume * BXMasterVolumeNumIncrements) / BXMasterVolumeNumIncrements;
+    }
+    [[BXBezelController controller] showVolumeBezelForVolume: self.effectiveVolume];
+}
+
+- (IBAction) decrementVolume: (id)sender
+{
+    if (self.masterVolume > 0.0f)
+    {
+        //Round the volume to the nearest increment after decrementing.
+        float decrementedVolume = self.masterVolume - BXMasterVolumeIncrement;
+        self.masterVolume = roundf(decrementedVolume * BXMasterVolumeNumIncrements) / BXMasterVolumeNumIncrements;
+    }
+    self.muted = (self.masterVolume == 0);
+    
+    [[BXBezelController controller] showVolumeBezelForVolume: self.effectiveVolume];
 }
 
 @end

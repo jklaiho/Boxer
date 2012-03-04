@@ -34,9 +34,9 @@ enum {
 	
 	NSOperationQueue *generalQueue;
 	
-	IBOutlet BXJoystickController *joystickController;
-	IBOutlet BXJoypadController *joypadController;
-    IBOutlet BXKeyboardEventTap *hotkeySuppressionTap;
+    BXJoystickController *joystickController;
+    BXJoypadController *joypadController;
+    BXKeyboardEventTap *hotkeySuppressionTap;
 	
     BXMIDIDeviceMonitor *MIDIDeviceMonitor;
 }
@@ -45,8 +45,8 @@ enum {
 @property (retain) BXSession *currentSession;
 
 //App-wide controllers for HID joystick input and JoyPad app input.
-@property (retain, nonatomic) BXJoystickController *joystickController;
-@property (retain, nonatomic) BXJoypadController *joypadController;
+@property (retain, nonatomic) IBOutlet BXJoystickController *joystickController;
+@property (retain, nonatomic) IBOutlet BXJoypadController *joypadController;
 @property (retain, nonatomic) BXMIDIDeviceMonitor *MIDIDeviceMonitor;
 @property (retain, nonatomic) BXKeyboardEventTap *hotkeySuppressionTap;
 
@@ -106,8 +106,31 @@ enum {
 //(Currently this is based on OS X's system settings, rather than our own preference.)
 - (BOOL) shouldPlayUISounds;
 
-//If UI sounds are enabled, play the sound matching the specified name at the specified volume.
+//Whether emulated audio is muted. Persisted across all sessions in user defaults.
+@property (assign, nonatomic) BOOL muted;
+//The master volume for emulated audio. Persisted across all sessions in user defaults.
+@property (assign, nonatomic) float masterVolume; 
+
+//The master volume as it will affect played sounds and appear in volume indicators.
+//Will be 0 while muted, regardless of the master volume currently set.
+//Changing this will change the master volume and mute/unmute sound.
+@property (assign, nonatomic) float effectiveVolume;
+
+//If UI sounds are enabled, play the sound matching the specified name
+//at the specified volume, with the specified optional delay.
 - (void) playUISoundWithName: (NSString *)soundName atVolume: (float)volume;
+- (void) playUISoundWithName: (NSString *)soundName atVolume: (float)volume afterDelay: (NSTimeInterval)delay;
+
+//Toggle mute on/off.
+- (IBAction) toggleMuted: (id)sender;
+
+//Increment/decrement the master volume. These will also unmute the sound.
+- (IBAction) incrementVolume: (id)sender;
+- (IBAction) decrementVolume: (id)sender;
+
+//Set the volume to minimum/maximum.
+- (IBAction) minimizeVolume: (id)sender;
+- (IBAction) maximizeVolume: (id)sender;
 
 
 #pragma mark -
@@ -125,6 +148,12 @@ enum {
 - (IBAction) orderFrontPreferencesPanel: (id)sender;	//Display Boxer's preferences panel.
 - (IBAction) orderFrontInspectorPanel: (id)sender;		//Display Boxer's inspector HUD panel.
 - (IBAction) toggleInspectorPanel: (id)sender;			//Display/hide Boxer's inspector HUD panel.
+
+//Display the relevant panels of the Inspector.
+- (IBAction) showGamePanel:		(id)sender;
+- (IBAction) showCPUPanel:		(id)sender;
+- (IBAction) showDrivesPanel:	(id)sender;
+- (IBAction) showMousePanel:	(id)sender;
 
 //The URLs and email addresses for the following actions are configured in the Info.plist file.
 

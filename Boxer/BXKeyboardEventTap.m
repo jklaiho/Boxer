@@ -7,9 +7,9 @@
 
 #import <AppKit/AppKit.h> //For NSApp
 #import <Carbon/Carbon.h> //For keycodes
+#import <IOKit/hidsystem/ev_keymap.h> //For media key codes
+
 #import "BXKeyboardEventTap.h"
-#import "BXAppController.h"
-#import "BXSession.h"
 #import "BXContinuousThread.h"
 
 
@@ -37,36 +37,25 @@ static CGEventRef _handleEventFromTap(CGEventTapProxy proxy, CGEventType type, C
 //tapThread's run loop, listening to the tap until the thread is cancelled.
 - (void) _runTap;
 
-//Returns whether the specified keyup/down event represents an OS X hotkey.
-- (BOOL) _isHotKeyEvent: (CGEventRef)event;
-
-//Returns whether we should bother suppressing the specified hotkey event. Will return YES
-//if we're the active application and the key window is an active (not paused) DOS session,
-//NO otherwise.
-- (BOOL) _shouldSuppressHotKeyEvent: (CGEventRef)event;
-
 @end
 
 
 @implementation BXKeyboardEventTap
 @synthesize enabled = _enabled;
 @synthesize tapThread = _tapThread;
+@synthesize delegate = _delegate;
 
-- (void) awakeFromNib
+- (id) init
 {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    
-    [self bind: @"enabled"
-      toObject: defaults
-   withKeyPath: @"suppressSystemHotkeys"
-       options: nil];
-    
-    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-    [center addObserver: self
-               selector: @selector(applicationDidBecomeActive:)
-                   name: NSApplicationDidBecomeActiveNotification
-                 object: NSApp];
-    
+    if ((self = [super init]))
+    {
+        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+        [center addObserver: self
+                   selector: @selector(applicationDidBecomeActive:)
+                       name: NSApplicationDidBecomeActiveNotification
+                     object: NSApp];
+    }
+    return self;
 }
 
 - (void) applicationDidBecomeActive: (NSNotification *)notification
@@ -151,7 +140,7 @@ static CGEventRef _handleEventFromTap(CGEventTapProxy proxy, CGEventType type, C
     _tap = CGEventTapCreate(kCGSessionEventTap,
                             kCGHeadInsertEventTap,
                             kCGEventTapOptionDefault,
-                            CGEventMaskBit(kCGEventKeyUp) | CGEventMaskBit(kCGEventKeyDown),
+                            CGEventMaskBit(kCGEventKeyUp) | CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(NX_SYSDEFINED),
                             _handleEventFromTap,
                             self);
         
@@ -179,78 +168,45 @@ static CGEventRef _handleEventFromTap(CGEventTapProxy proxy, CGEventType type, C
     [pool drain];
 }
 
-- (BOOL) _isHotKeyEvent: (CGEventRef)event
-{
-    int64_t keyCode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
-    
-    switch(keyCode)
-    {
-        case kVK_UpArrow:
-        case kVK_DownArrow:
-        case kVK_LeftArrow:
-        case kVK_RightArrow:
-        case kVK_F1:
-        case kVK_F2:
-        case kVK_F3:
-        case kVK_F4:
-        case kVK_F5:
-        case kVK_F6:
-        case kVK_F7:
-        case kVK_F8:
-        case kVK_F9:
-        case kVK_F10:
-        case kVK_F11:
-        case kVK_F12:
-            return YES;
-            break;
-        default:
-            return NO;
-    }
-}
-
-- (BOOL) _shouldSuppressHotKeyEvent: (CGEventRef)event
-{
-    if (![self isEnabled]) return NO;
-    if (![NSApp isActive]) return NO;
-    
-    BOOL retVal = NO;
-    
-    @synchronized([NSApp delegate])
-    {
-        id document = [[NSApp delegate] documentForWindow: [NSApp keyWindow]];
-        @synchronized(document)
-        {
-            if ([document respondsToSelector: @selector(programIsActive)] && [document programIsActive])
-                retVal = YES;
-        }
-    }
-    return retVal;
-}
-
 - (CGEventRef) _handleEvent: (CGEventRef)event
                      ofType: (CGEventType)type
                   fromProxy: (CGEventTapProxy)proxy
 {
+    //If we're not enabled or we have no way of validating the events, give up early
+    if (!self.enabled || !self.delegate)
+    {
+        return event;
+    }
+    
+    BOOL shouldCapture = NO;
     switch (type)
     {
         case kCGEventKeyDown:
         case kCGEventKeyUp:
+        case NX_SYSDEFINED:
         {
-            //If this is a hotkey event we want to handle ourselves,
-            //post it directly to our application and don't let it
-            //go through the regular OS X event dispatch.
-            if ([self _isHotKeyEvent: event] && [self _shouldSuppressHotKeyEvent: event])
+            //First try and make this into a cocoa event
+            NSEvent *cocoaEvent = nil;
+            @try
             {
-                ProcessSerialNumber PSN;
-                OSErr error = GetCurrentProcess(&PSN);
-                if (error == noErr)
+                cocoaEvent = [NSEvent eventWithCGEvent: event];
+            }
+            @catch (NSException *exception) {
+                //If the event could not be converted into a cocoa event, give up
+            }
+            
+            if (cocoaEvent)
+            {
+                if (type == NX_SYSDEFINED)
                 {
-                    CGEventPostToPSN(&PSN, event);
-                
-                    //Returning NULL cancels the original event
-                    return NULL;
+                    shouldCapture = [self.delegate eventTap: self shouldCaptureSystemDefinedEvent: cocoaEvent];
+                }
+                else
+                {
+                    shouldCapture = [self.delegate eventTap: self shouldCaptureKeyEvent: cocoaEvent];
                 }
             }
+            
             break;
         }
         
@@ -263,6 +219,19 @@ static CGEventRef _handleEventFromTap(CGEventTapProxy proxy, CGEventType type, C
         }
     }
     
+    if (shouldCapture)
+    {
+        ProcessSerialNumber PSN;
+        OSErr error = GetCurrentProcess(&PSN);
+        if (error == noErr)
+        {
+            CGEventPostToPSN(&PSN, event);
+            
+            //Returning NULL cancels the original event
+            return NULL;
+        }
+    }
+    
     return event;
 }
 
@@ -270,11 +239,13 @@ static CGEventRef _handleEventFromTap(CGEventTapProxy proxy, CGEventType type, C
 {
     CGEventRef returnedEvent = event;
     
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     BXKeyboardEventTap *tap = (BXKeyboardEventTap *)userInfo;
     if (tap)
     {
         returnedEvent = [tap _handleEvent: event ofType: type fromProxy: proxy];
     }
+    [pool drain];
     
     return returnedEvent;
 }

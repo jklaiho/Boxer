@@ -123,3 +123,9 @@ void boxer_sendMIDISysex(Bit8u *msg, Bitu len)
 {
     [[BXEmulator currentEmulator] sendMIDISysex: [NSData dataWithBytesNoCopy: msg length: len freeWhenDone: NO]];
 }
+
+float boxer_masterVolume(BXAudioChannel channel)
+{
+    //We don't use separate left and right volumes.
+    return [BXEmulator currentEmulator].masterVolume;
+}

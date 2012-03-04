@@ -8,26 +8,16 @@
 #import "BXSessionPrivate.h"
 #import "BXEmulator+BXShell.h"
 #import "BXEmulator+BXPaste.h"
+#import "BXEmulator+BXAudio.h"
 #import "BXValueTransformers.h"
-#import "BXAppController.h"
+#import "BXAppController+BXSupportFiles.h"
 #import "BXVideoHandler.h"
-#import "BXEmulatorConfiguration.h"
-#import "BXInspectorController.h"
 
 #import "BXDOSWindowController.h"
 #import "BXInputController.h"
 #import "BXBezelController.h"
 
-
-#pragma mark Private method declarations
-
-@interface BXSession ()
-
-//Whether we can accept pasted data from the specified pasteboard.
-//Copy-paste is disabled, so this currently always returns NO.
-- (BOOL) _canPasteFromPasteboard: (NSPasteboard *)pboard;
-
-@end
+#import "NSImage+BXSaveImages.h"
 
 
 @implementation BXSession (BXEmulatorControls)
@@ -39,27 +29,32 @@
 {
     //Do not reinitialize in subclasses
     if (self == [BXSession class])
-    {
-        BXBandedValueTransformer *speedBanding		= [[BXBandedValueTransformer alloc] init];
-        BXInvertNumberTransformer *invertFramerate	= [[BXInvertNumberTransformer alloc] init];
+    {   
+        NSDateFormatter *screenshotDateFormatter = [[NSDateFormatter alloc] init];
+        screenshotDateFormatter.dateFormat = NSLocalizedString(@"yyyy-MM-dd 'at' h.mm.ss a", @"The date and time format to use for screenshot filenames. Literal strings (such as the 'at') should be enclosed in single quotes. The date order should not be changed when localizing unless really necessary, as this is important to maintain chronological ordering in alphabetical file listings. Note that some characters such as / and : are not permissible in filenames and will be stripped out or replaced.");
         
-        NSArray *bands = [[NSArray alloc] initWithObjects:
-            [NSNumber numberWithInteger: BXMinSpeedThreshold],
-            [NSNumber numberWithInteger: BX286SpeedThreshold],
-            [NSNumber numberWithInteger: BX386SpeedThreshold],
-            [NSNumber numberWithInteger: BX486SpeedThreshold],
-            [NSNumber numberWithInteger: BXPentiumSpeedThreshold],
-            [NSNumber numberWithInteger: BXMaxSpeedThreshold],
-        nil];
         
-        [speedBanding setBandThresholds: bands];
+        double bands[6] = {
+            BXMinSpeedThreshold,
+            BX286SpeedThreshold,
+            BX386SpeedThreshold,
+            BX486SpeedThreshold,
+            BXPentiumSpeedThreshold,
+            BXMaxSpeedThreshold
+        };
+        NSValueTransformer *speedBanding		= [[BXBandedValueTransformer alloc] initWithThresholds: bands count: 6];
+        NSValueTransformer *invertFramerate     = [[BXInvertNumberTransformer alloc] init];
+        NSValueTransformer *screenshotDater     = [[BXDateTransformer alloc] initWithDateFormatter: screenshotDateFormatter];
+        
         
         [NSValueTransformer setValueTransformer: speedBanding forName: @"BXSpeedSliderTransformer"];
         [NSValueTransformer setValueTransformer: invertFramerate forName: @"BXFrameRateSliderTransformer"];
+        [NSValueTransformer setValueTransformer: screenshotDater forName: @"BXScreenshotDateTransformer"];
         
         [speedBanding release];
         [invertFramerate release];
-        [bands release];
+        [screenshotDater release];
+        [screenshotDateFormatter release];
     }
 }
 
@@ -105,25 +100,29 @@
 
 - (IBAction) pause: (id)sender
 {
-    if (![self isPaused])
+    if (self.isEmulating && !self.isPaused)
     {
-        [self setPaused: YES];
+        self.paused = YES;
+        //Disable fast-forward upon pausing.
+        self.emulator.turboSpeed = NO;
         [[BXBezelController controller] showPauseBezel];
     }
 }
 
 - (IBAction) resume: (id)sender
 {
-    if ([self isPaused])
+    if (self.isEmulating && self.isPaused)
     {
-        [self setPaused: NO];
+        self.paused = NO;
+        //Disable fast-forward upon resuming.
+        self.emulator.turboSpeed = NO;
         [[BXBezelController controller] showPlayBezel];
     }
 }
 
 - (IBAction) togglePaused: (id)sender
 {
-    if ([self isPaused])
+    if (self.isPaused)
         [self resume: sender];
     else
         [self pause: sender];
@@ -131,12 +130,12 @@
 
 - (NSUInteger) frameskip
 {
-	return [[emulator videoHandler] frameskip];
+	return emulator.videoHandler.frameskip;
 }
 
 - (void) setFrameskip: (NSUInteger)frameskip
 {
-	[[emulator videoHandler] setFrameskip: frameskip];
+	emulator.videoHandler.frameskip = frameskip;
 	
 	[gameSettings setObject: [NSNumber numberWithUnsignedInteger: frameskip] forKey: @"frameskip"];
 }
@@ -150,49 +149,54 @@
 
 - (IBAction) incrementFrameSkip: (id)sender
 {
-	NSNumber *newFrameskip = [NSNumber numberWithInteger: [self frameskip] + 1];
+	NSNumber *newFrameskip = [NSNumber numberWithInteger: self.frameskip + 1];
 	if ([self validateFrameskip: &newFrameskip error: nil])
-		[self setFrameskip: [newFrameskip integerValue]];
+		self.frameskip = newFrameskip.integerValue;
 }
 
 - (IBAction) decrementFrameSkip: (id)sender
 {
-	NSNumber *newFrameskip = [NSNumber numberWithInteger: [self frameskip] - 1];
+	NSNumber *newFrameskip = [NSNumber numberWithInteger: self.frameskip - 1];
 	if ([self validateFrameskip: &newFrameskip error: nil])
-		[self setFrameskip: [newFrameskip integerValue]];
+		self.frameskip = newFrameskip.integerValue;
 }
 
 
 - (BOOL) isAutoSpeed
 {
-	return [emulator isAutoSpeed];
+	return self.emulator.isAutoSpeed;
 }
 
 - (void) setAutoSpeed: (BOOL)isAuto
 {
-	[emulator setAutoSpeed: isAuto];
+    self.emulator.autoSpeed = isAuto;
+    //Upon changing the emulator speed, turn off fast-forward.
+    self.emulator.turboSpeed = NO;
 	
 	//Preserve changes to the speed settings
-	[gameSettings setObject: [NSNumber numberWithInteger: BXAutoSpeed] forKey: @"CPUSpeed"];
+	[self.gameSettings setObject: [NSNumber numberWithInteger: BXAutoSpeed] forKey: @"CPUSpeed"];
 }
 
 - (NSInteger) CPUSpeed
 {
-	return [emulator isAutoSpeed] ? BXAutoSpeed : [emulator fixedSpeed];
+	return self.emulator.isAutoSpeed ? BXAutoSpeed : self.emulator.fixedSpeed;
 }
 
 - (void) setCPUSpeed: (NSInteger)speed
 {
     if (speed == BXAutoSpeed)
     {
-        [self setAutoSpeed: YES];
+        self.autoSpeed = YES;
     }
     else
     {
-        [self setAutoSpeed: NO];
-        [emulator setFixedSpeed: speed];
+        self.autoSpeed = NO;
+        self.emulator.fixedSpeed = speed;
         
-        [gameSettings setObject: [NSNumber numberWithInteger: speed] forKey: @"CPUSpeed"];
+        //Upon changing the emulator speed, turn off fast-forward.
+        self.emulator.turboSpeed = NO;
+        
+        [self.gameSettings setObject: [NSNumber numberWithInteger: speed] forKey: @"CPUSpeed"];
     }
 }
 
@@ -209,29 +213,29 @@
 
 - (IBAction) incrementSpeed: (id)sender
 {
-	if ([self speedAtMaximum]) return;
+	if (self.speedAtMaximum) return;
 	
-	NSInteger currentSpeed = [self CPUSpeed];
+	NSInteger currentSpeed = self.CPUSpeed;
 	
-	if (currentSpeed >= BXMaxSpeedThreshold) [self setAutoSpeed: YES];
+	if (currentSpeed >= BXMaxSpeedThreshold) self.autoSpeed = YES;
 	else
 	{
-		NSInteger increment	= [[self class] incrementAmountForSpeed: currentSpeed goingUp: YES];
+		NSInteger increment	= [self.class incrementAmountForSpeed: currentSpeed goingUp: YES];
 		//This snaps the speed to the nearest increment rather than doing straight addition
 		increment -= (currentSpeed % increment);
 		
 		//Validate our final value before assigning it
 		NSNumber *newSpeed = [NSNumber numberWithInteger: currentSpeed + increment];
 		if ([self validateCPUSpeed: &newSpeed error: nil])
-			[self setCPUSpeed: [newSpeed integerValue]];
+			self.CPUSpeed = newSpeed.integerValue;
 	}
     
-    [[BXBezelController controller] showCPUSpeedBezelForSpeed: [self CPUSpeed]];
+    [[BXBezelController controller] showCPUSpeedBezelForSpeed: self.CPUSpeed];
 }
 
 - (IBAction) decrementSpeed: (id)sender
 {
-	if ([self speedAtMinimum]) return;
+	if (self.speedAtMinimum) return;
 	
 	if ([self isAutoSpeed])
 	{
@@ -255,11 +259,92 @@
 }
 
 
+
+- (IBAction) toggleFastForward: (id)sender
+{
+    if (!self.emulating) return;
+    
+    //Check if the menu option was triggered via its key equivalent or via a regular click.
+    NSEvent *currentEvent = [NSApp currentEvent];
+    
+    //If the toggle was triggered by a key event, then trigger the fast-forward until the key is released.
+    if (currentEvent.type == NSKeyDown)
+    {
+        [self fastForward: sender];
+        
+        if (self.emulator.isConcurrent)
+        {
+            //Keep fast-forwarding until the user lifts the key. Once we receive the key-up,
+            //then discard all the repeated key-down events that occurred before the key-up:
+            //otherwise, the action will trigger again and again for each repeat.
+            NSEvent *keyUp = [NSApp nextEventMatchingMask: NSKeyUpMask
+                                                untilDate: [NSDate distantFuture]
+                                                   inMode: NSEventTrackingRunLoopMode
+                                                  dequeue: NO];
+            [NSApp discardEventsMatchingMask: NSKeyDownMask beforeEvent: keyUp];
+            [self releaseFastForward: sender];
+        }
+        else
+        {
+            //IMPLEMENTATION NOTE: when the emulator is running on the main thread,
+            //an event-tracking loop like the one above would block the emulation:
+            //defeating the purpose of the fast-forward. So instead, we listen for
+            //the key-up within the session's event-dispatch loop: making it a kind
+            //of inverted tracking loop.
+            waitingForFastForwardRelease = YES;
+        }
+    }
+    //If the option was toggled by a regular menu click, then make it 'stick' until toggled again.
+    else
+    {
+        if (!self.emulator.turboSpeed)
+        {
+            [self fastForward: sender];
+        }
+        else
+        {
+            [self releaseFastForward: sender];
+        }
+        waitingForFastForwardRelease = NO;
+    }
+}
+
+- (IBAction) fastForward: (id)sender
+{
+    if (!self.emulating) return;
+    
+    //Unpause when fast-forwarding
+    [self resume: self];
+    
+    if (!self.emulator.turboSpeed)
+    {
+        self.emulator.turboSpeed = YES;
+        
+        [[BXBezelController controller] showFastForwardBezel];
+    }
+}
+        
+- (IBAction) releaseFastForward: (id)sender
+{
+    if (!self.emulating) return;
+    
+    if (self.emulator.turboSpeed)
+    {
+        self.emulator.turboSpeed = NO;
+        BXBezelController *bezel = [BXBezelController controller];
+        if (bezel.currentBezel == bezel.fastForwardBezel)
+            [bezel hideBezel];
+        
+        waitingForFastForwardRelease = NO;
+    }
+}
+
+
 - (void) setSliderSpeed: (NSInteger)speed
 {
 	//If we're at the maximum speed, bump it into auto-throttling mode
 	if (speed >= BXMaxSpeedThreshold) speed = BXAutoSpeed;
-	[self setCPUSpeed: speed];
+	self.CPUSpeed = speed;
 }
 
 - (NSInteger) sliderSpeed
@@ -267,7 +352,7 @@
 	//Report the max fixed speed if we're in auto-throttling mode,
     //so that the knob will appear at the top end of the slider
     //instead of the bottom
-	return ([self isAutoSpeed]) ? BXMaxSpeedThreshold : [self CPUSpeed];
+	return (self.isAutoSpeed) ? BXMaxSpeedThreshold : self.CPUSpeed;
 }
 
 //Snap fixed speed to even increments, unless the Option key is held down
@@ -283,35 +368,35 @@
 }
 
 
-- (BOOL) isDynamic	{ return [emulator coreMode] == BXCoreDynamic; }
+- (BOOL) isDynamic	{ return self.emulator.coreMode == BXCoreDynamic; }
 
 - (void) setDynamic: (BOOL)dynamic
 {
-	[emulator setCoreMode: dynamic ? BXCoreDynamic : BXCoreNormal];
+	self.emulator.coreMode = dynamic ? BXCoreDynamic : BXCoreNormal;
 	
-	[gameSettings setObject: [NSNumber numberWithInteger: [emulator coreMode]] forKey: @"coreMode"];
+	[gameSettings setObject: [NSNumber numberWithInteger: emulator.coreMode] forKey: @"coreMode"];
 }
 
 
 - (BOOL) validateUserInterfaceItem: (id)theItem
 {
 	//All our actions depend on the emulator being active
-	if (![self isEmulating]) return NO;
+	if (!self.isEmulating) return NO;
 	
 	SEL theAction = [theItem action];
-	
-	if (theAction == @selector(incrementSpeed:))		return ![self speedAtMaximum];
-	if (theAction == @selector(decrementSpeed:))		return ![self speedAtMinimum];
+        
+	if (theAction == @selector(incrementSpeed:))		return !self.speedAtMaximum;
+	if (theAction == @selector(decrementSpeed:))		return !self.speedAtMinimum;
 
-	if (theAction == @selector(incrementFrameSkip:))	return ![self frameskipAtMaximum];
-	if (theAction == @selector(decrementFrameSkip:))	return ![self frameskipAtMinimum];
+	if (theAction == @selector(incrementFrameSkip:))	return !self.frameskipAtMaximum;
+	if (theAction == @selector(decrementFrameSkip:))	return !self.frameskipAtMinimum;
 
 	//Defined in BXFileManager
-	if (theAction == @selector(openInDOS:))				return [emulator isAtPrompt];
-	if (theAction == @selector(relaunch:))				return [emulator isAtPrompt];
+	if (theAction == @selector(openInDOS:))				return emulator.isAtPrompt;
+	if (theAction == @selector(relaunch:))				return emulator.isAtPrompt;
 	
 	if (theAction == @selector(paste:))
-		return [self _canPasteFromPasteboard: [NSPasteboard generalPasteboard]];
+		return [self canPasteFromPasteboard: [NSPasteboard generalPasteboard]];
 	
 	return [super validateUserInterfaceItem: theItem];
 }
@@ -419,6 +504,19 @@
         [theItem setTitle: NSLocalizedString(@"Previous Disc", @"Menu item for cycling to the previous queued CD-ROM.")];
         return NO;
     }
+    else if (theAction == @selector(toggleFastForward:))
+    {
+		if (!self.emulator.isTurboSpeed)
+			title = NSLocalizedString(@"Fast Forward", @"Emulation menu option for fast-forwarding the emulator.");
+		else
+			title = NSLocalizedString(@"Normal Speed", @"Emulation menu option for returning from fast-forward.");
+		
+		[theItem setTitle: title];
+        
+        //TWEAK: disable the menu item while we're waiting for the user to release the key.
+        //That will break out of the menu's own key-event loop, which would otherwise block.
+		return [self isEmulating] && !waitingForFastForwardRelease;
+    }
     return [super validateMenuItem: theItem];
 }
 
@@ -449,10 +547,14 @@
 		pastedString = [filePaths lastObject];
 	}
 	else pastedString = [pboard stringForType: NSStringPboardType];
+    
+    //Unpause when pasting strings
+    [self resume: self];
+    
 	[emulator handlePastedString: pastedString];
 }
 
-- (BOOL) _canPasteFromPasteboard: (NSPasteboard *)pboard 
+- (BOOL) canPasteFromPasteboard: (NSPasteboard *)pboard 
 {
 	NSArray *acceptedPasteTypes = [NSArray arrayWithObjects: NSFilenamesPboardType, NSStringPboardType, nil];
 	NSString *bestType = [pboard availableTypeFromArray: acceptedPasteTypes];
@@ -497,11 +599,50 @@
 
 
 #pragma mark -
-#pragma mark Inspector actions
+#pragma mark Recording
 
-//These are passthroughs for when BXInspectorController isn't in the responder chain
-- (IBAction) showGamePanel:		(id)sender	{ [[BXInspectorController controller] showGamePanel: sender]; }
-- (IBAction) showCPUPanel:		(id)sender	{ [[BXInspectorController controller] showCPUPanel: sender]; }
-- (IBAction) showDrivesPanel:	(id)sender	{ [[BXInspectorController controller] showDrivesPanel: sender]; }
-- (IBAction) showMousePanel:	(id)sender	{ [[BXInspectorController controller] showMousePanel: sender]; }
+- (IBAction) saveScreenshot: (id)sender
+{   
+    NSImage *screenshot = [self.DOSWindowController screenshotOfCurrentFrame];
+    if (screenshot)
+    {
+        //Work out an appropriate filename, based on the window title and the current date and time.
+        NSValueTransformer *transformer = [NSValueTransformer valueTransformerForName: @"BXScreenshotDateTransformer"];
+        NSString *formattedDate = [transformer transformedValue: [NSDate date]];
+        
+        NSString *nameFormat = NSLocalizedString(@"%1$@ %2$@.png",
+                                                 @"Filename pattern for screenshots: %1$@ is the display name of the DOS session, %2$@ is the current date and time in a notation suitable for chronologically-ordered filenames.");
+        
+        NSString *fileName = [NSString stringWithFormat:
+                              nameFormat,
+                              [self.DOSWindowController.window title],
+                              formattedDate,
+                              nil];
+        
+        //Sanitise the filename in case it contains characters that are disallowed for file paths.
+        //TODO: move this off to an NSFileManager/NSString category.
+        fileName = [fileName stringByReplacingOccurrencesOfString: @":" withString: @"."];
+        fileName = [fileName stringByReplacingOccurrencesOfString: @"/" withString: @"-"]; 
+        
+        NSString *basePath = [[NSApp delegate] recordingsPathCreatingIfMissing: YES];
+        NSString *destination = [basePath stringByAppendingPathComponent: fileName];
+        
+        BOOL saved = [screenshot saveToPath: destination
+                                   withType: NSPNGFileType
+                                 properties: nil
+                                      error: nil];
+        
+        if (saved)
+        {
+            NSDictionary *attrs	= [NSDictionary dictionaryWithObject: [NSNumber numberWithBool: YES]
+                                                              forKey: NSFileExtensionHidden];
+            
+            [[NSFileManager defaultManager] setAttributes: attrs ofItemAtPath: destination error: nil];
+            
+            [[NSApp delegate] playUISoundWithName: @"Snapshot" atVolume: 1.0f];
+            [[BXBezelController controller] showScreenshotBezel];
+        }
+    }
+}
+
 @end

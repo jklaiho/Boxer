@@ -6,12 +6,14 @@
  */
 
 #import "BXEmulatorPrivate.h"
-#import "RegexKitLite.h"
 #import "BXEmulatedMT32.h"
 #import "BXExternalMIDIDevice.h"
 #import "BXExternalMT32+BXMT32Sysexes.h"
 #import "BXMIDISynth.h"
 #import "BXAudioSource.h"
+#import "BXDrive.h"
+
+#import <SDL/SDL.h>
 #import "mixer.h"
 
 
@@ -76,12 +78,13 @@ NSString * const BXMIDIExternalDeviceNeedsMT32SysexDelaysKey = @"Needs MT-32 Sys
 
 - (id <BXMIDIDevice>) attachMIDIDeviceForDescription: (NSDictionary *)description
 {
-    id <BXMIDIDevice> device = [[self delegate] MIDIDeviceForEmulator: self
-                                                   meetingDescription: description];
+    id <BXMIDIDevice> device = [self.delegate MIDIDeviceForEmulator: self
+                                                 meetingDescription: description];
     
-    if (device && device != [self activeMIDIDevice])
+    if (device && device != self.activeMIDIDevice)
     {
-        [self setActiveMIDIDevice: device];
+        self.activeMIDIDevice = device;
+        self.activeMIDIDevice.volume = self.masterVolume;
     }
     return device;
 }
@@ -106,7 +109,7 @@ NSString * const BXMIDIExternalDeviceNeedsMT32SysexDelaysKey = @"Needs MT-32 Sys
     
     //Autodetect if the music we're receiving would be suitable for an MT-32:
     //If so, and our current device can't play MT-32 music, try switching to one that can.
-    if ([self _shouldAutodetectMT32])
+    if (self._shouldAutodetectMT32)
     {
         //Check if the message we've received was intended for an MT-32,
         //and if so, how 'conclusive' it is that the game is playing MT-32 music.
@@ -135,7 +138,7 @@ NSString * const BXMIDIExternalDeviceNeedsMT32SysexDelaysKey = @"Needs MT-32 Sys
                 //autodetection so we don't keep trying.
                 else
                 {
-                    [self setAutodetectsMT32: NO];
+                    self.autodetectsMT32 = NO;
                     [self _clearPendingSysexMessages];
                 }
             }
@@ -144,18 +147,20 @@ NSString * const BXMIDIExternalDeviceNeedsMT32SysexDelaysKey = @"Needs MT-32 Sys
             //later. This ensures it won't miss out on any startup commands.
             else
             {
+#if BOXER_DEBUG
                 NSLog(@"Inconclusive MT-32 sysex: %@", [BXExternalMT32 dataInSysex: message
                                                                   includingAddress: YES]);
+#endif
                 [self _queueSysexMessage: message];
             }
         }
     }
 
-    if ([self activeMIDIDevice])
+    if (self.activeMIDIDevice)
     {
         //If we're not ready to send yet, wait until we are.
         [self _waitUntilActiveMIDIDeviceIsReady];
-        [[self activeMIDIDevice] handleSysex: message];
+        [self.activeMIDIDevice handleSysex: message];
     }
 }
 
@@ -164,6 +169,28 @@ NSString * const BXMIDIExternalDeviceNeedsMT32SysexDelaysKey = @"Needs MT-32 Sys
 
 #pragma mark -
 #pragma mark Private methods
+
+- (void) _suspendAudio
+{
+    SDL_PauseAudio(YES);
+    
+    cdromWasPlaying = (SDL_CDStatus(NULL) == CD_PLAYING);
+    if (cdromWasPlaying)
+        SDL_CDPause(NULL);
+    
+    [self.activeMIDIDevice pause];
+}
+
+- (void) _resumeAudio
+{
+    SDL_PauseAudio(NO);
+    
+    if (cdromWasPlaying)
+        SDL_CDResume(NULL);
+    
+    [self.activeMIDIDevice resume];
+}
+
 
 //Called periodically by our MIDI channel to fill its buffer with audio data.
 void _renderMIDIOutput(Bitu numFrames)
@@ -345,17 +372,22 @@ void _renderMIDIOutput(Bitu numFrames)
     id <BXMIDIDevice> device = [self activeMIDIDevice];
     BOOL askDelegate = [[self delegate] respondsToSelector: @selector(emulator:shouldWaitForMIDIDevice:untilDate:)];
     
-    while ([device isProcessing])
+    while (device.isProcessing)
     {
-        NSDate *date = [device dateWhenReady];
+        NSDate *date = device.dateWhenReady;
         BOOL keepWaiting = YES;
         
-        if (askDelegate) keepWaiting = [[self delegate] emulator: self
-                                         shouldWaitForMIDIDevice: device
-                                                       untilDate: date];
+        if (askDelegate) keepWaiting = [self.delegate emulator: self
+                                       shouldWaitForMIDIDevice: device
+                                                     untilDate: date];
         
-        if (keepWaiting) [NSThread sleepUntilDate: date];
-        else break;
+        //Block by running the thread's loop until the time is up
+        //or we've been cancelled
+        if (keepWaiting)
+        {
+            while (!self.isCancelled && [[NSRunLoop currentRunLoop] runMode: NSDefaultRunLoopMode
+                                                                 beforeDate: date]);
+        }
     }
 }
 
@@ -364,6 +396,36 @@ void _renderMIDIOutput(Bitu numFrames)
     if (![self activeMIDIDevice])
     {
         [self attachMIDIDeviceForDescription: [self requestedMIDIDeviceDescription]];
+    }
+}
+
+
+#pragma mark -
+#pragma mark Volume and muting
+
+- (void) setMasterVolume: (float)volume
+{
+    volume = MAX(0.0f, volume);
+    volume = MIN(volume, 1.0f);
+    
+    if (self.masterVolume != volume)
+    {
+        masterVolume = volume;
+        [self _syncVolume];
+    }
+}
+
+- (void) _syncVolume
+{
+    //Update the DOSBox mixer with the new volume and mute settings.
+    //Note that we can only do this once the mixer subsystem has initialized,
+    //and won't need to do it before then anyway.
+    if (self.isInitialized) boxer_updateVolumes();
+    
+    //Also update the volume of our current MIDI device.
+    if (self.activeMIDIDevice)
+    {
+        self.activeMIDIDevice.volume = self.masterVolume;
     }
 }
 

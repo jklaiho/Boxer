@@ -27,6 +27,8 @@
 
 #import "BXBezelController.h"
 
+//For text input services notification names
+#import <Carbon/Carbon.h>
 
 
 @implementation BXInputController
@@ -127,6 +129,8 @@
 			[joystickController removeObserver: self forKeyPath: @"joystickDevices"];
 			[joypadController removeObserver: self forKeyPath: @"hasJoypadDevices"];
 			
+            CFNotificationCenterRef cfCenter = CFNotificationCenterGetDistributedCenter();
+            CFNotificationCenterRemoveObserver(cfCenter, self, kTISNotifySelectedKeyboardInputSourceChanged, NULL);
 			
 			[self didResignKey];
 		}
@@ -191,14 +195,17 @@
 						 options: NSKeyValueObservingOptionInitial
 						 context: nil];
 			
-			//Set the DOS keyboard layout to match the current OS X layout as best as possible
-			//TODO: listen for input source changes
-			NSString *bestLayoutMatch = [[self class] keyboardLayoutForCurrentInputMethod];
-            if (bestLayoutMatch)
-            {
-                [[self _emulatedKeyboard] setActiveLayout: bestLayoutMatch];
-			}
             
+			//Listen for changes to the keyboard input method
+            CFNotificationCenterRef cfCenter = CFNotificationCenterGetDistributedCenter();
+            CFNotificationCenterAddObserver(cfCenter, self, &_inputSourceChanged,
+                                            kTISNotifySelectedKeyboardInputSourceChanged, NULL,
+                                            CFNotificationSuspensionBehaviorCoalesce);
+            
+            //Sync the current keyboard layout.
+            [self _syncKeyboardLayout];
+            
+            //Sync the current state of the input methods.
 			[self didBecomeKey];
 		}
 	}
@@ -375,7 +382,7 @@
 
 - (void) didBecomeKey
 {
-	//Account for any changes to key modifier flags while we didn't have keyboard focus.
+    //Account for any changes to key modifier flags while we didn't have keyboard focus.
 	//IMPLEMENTATION NOTE: CGEventSourceFlagsState returns the currently active modifiers
 	//outside of the event stream. It works the same as the 10.6-only NSEvent +modifierFlags,
 	//but is available on 10.5 and (unlike +modifierFlags) it also includes side-specific Shift,
@@ -385,6 +392,15 @@
 	
 	//Also sync the cursor state while we're at it, in case the cursor was already over the window.
 	[self cursorUpdate: nil];
+}
+
+void _inputSourceChanged(CFNotificationCenterRef center,
+                         void *observer,
+                         CFStringRef name,
+                         const void *object,
+                         CFDictionaryRef userInfo)
+{
+    [(BXInputController *)observer performSelectorOnMainThread: @selector(_syncKeyboardLayout) withObject: nil waitUntilDone: NO];
 }
 
 
@@ -543,14 +559,12 @@
 - (void) mouseDown: (NSEvent *)theEvent
 {
 	//Unpause whenever the view is clicked on
-	[[self representedObject] resume: self];
+	[self.representedObject resume: self];
 	
 	//Only respond to clicks if we're locked or tracking mouse input while unlocked
 	if ([self _controlsCursorWhileMouseInside])
 	{
-		BXEmulatedMouse *mouse = [self _emulatedMouse];
-		
-		NSUInteger modifiers = [theEvent modifierFlags];
+		NSUInteger modifiers = theEvent.modifierFlags;
 		
         //Cmd-clicking toggles mouse-locking and causes the actual click to be ignored.
 		if ((modifiers & NSCommandKeyMask) == NSCommandKeyMask)
@@ -561,31 +575,30 @@
         {
             //Check if our right-mouse-button/both-mouse-button shortcut modifiers are being
             //pressed: if so, simulate the appropriate kind of mouse click.
-            NSDictionary *gameSettings = [[self representedObject] gameSettings];
+            NSDictionary *gameSettings = self.representedObject.gameSettings;
             
             NSUInteger rightButtonModifierMask = [[gameSettings objectForKey: @"mouseButtonModifierRight"] unsignedIntegerValue];
-            
             NSUInteger bothButtonsModifierMask = [[gameSettings objectForKey: @"mouseButtonModifierBoth"] unsignedIntegerValue];
                     
             //Check if our both-buttons-at-once modifiers are being pressed.
             if (bothButtonsModifierMask > 0 && (modifiers & bothButtonsModifierMask) == bothButtonsModifierMask)
             {
                 simulatedMouseButtons |= BXMouseButtonLeftAndRightMask;
-                [mouse buttonDown: BXMouseButtonLeft];
-                [mouse buttonDown: BXMouseButtonRight];
+                [self._emulatedMouse buttonDown: BXMouseButtonLeft];
+                [self._emulatedMouse buttonDown: BXMouseButtonRight];
             }
             
             //Check if our right-button modifiers are being pressed.
             else if (rightButtonModifierMask > 0 && (modifiers & rightButtonModifierMask) == rightButtonModifierMask)
             {
                 simulatedMouseButtons |= BXMouseButtonRightMask;
-                [mouse buttonDown: BXMouseButtonRight];
+                [self._emulatedMouse buttonDown: BXMouseButtonRight];
             }
             
             //Otherwise, pass the left click on to the emulator as-is.
             else
             {
-                [mouse buttonDown: BXMouseButtonLeft];   
+                [self._emulatedMouse buttonDown: BXMouseButtonLeft];   
             }
         }
 	}
@@ -606,11 +619,26 @@
 - (void) rightMouseDown: (NSEvent *)theEvent
 {
 	//Unpause whenever the view is clicked on
-	[[self representedObject] resume: self];
+	[self.representedObject resume: self];
 	
 	if ([self _controlsCursorWhileMouseInside])
 	{
-		[[self _emulatedMouse] buttonDown: BXMouseButtonRight];
+        //Check if the both-mouse-button shortcut modifier is being pressed:
+        //if so, simulate both buttons being clicked instead of just the right one.
+        NSUInteger currentModifiers = theEvent.modifierFlags;
+        NSDictionary *gameSettings = self.representedObject.gameSettings;
+        NSUInteger bothButtonsModifierMask = [[gameSettings objectForKey: @"mouseButtonModifierBoth"] unsignedIntegerValue];
+        
+        if (bothButtonsModifierMask > 0 && (currentModifiers & bothButtonsModifierMask) == bothButtonsModifierMask)
+        {
+            simulatedMouseButtons |= BXMouseButtonLeftAndRightMask;
+            [self._emulatedMouse buttonDown: BXMouseButtonLeft];
+            [self._emulatedMouse buttonDown: BXMouseButtonRight];
+        }
+        else
+        {
+            [self._emulatedMouse buttonDown: BXMouseButtonRight];
+        }
 	}
 	else
 	{
@@ -621,11 +649,11 @@
 - (void) otherMouseDown: (NSEvent *)theEvent
 {
 	//Unpause whenever the view is clicked on
-	[[self representedObject] resume: self];
+	[self.representedObject resume: self];
 	
-	if ([self _controlsCursorWhileMouseInside] && [theEvent buttonNumber] == BXMouseButtonMiddle)
+	if ([self _controlsCursorWhileMouseInside] && theEvent.buttonNumber == BXMouseButtonMiddle)
 	{
-		[[self _emulatedMouse] buttonDown: BXMouseButtonMiddle];
+		[self._emulatedMouse buttonDown: BXMouseButtonMiddle];
 	}
 	else
 	{
@@ -633,27 +661,72 @@
 	}
 }
 
+- (void) _syncSimulatedMouseButtons: (NSUInteger)currentModifiers
+{
+    //Because we can't reliably detect mouse button states from arbitrary NSEvents,
+    //we retrieve their current value independent of the current event.
+    BOOL leftButtonDown     = CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft);
+    BOOL rightButtonDown    = CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonRight);
+    
+    //Check whether the both-mouse-buttons keyboard modifier has been pressed
+    //or released while a mouse button is down, and update the simulated mouse
+    //buttons accordingly.
+    if (leftButtonDown || rightButtonDown)
+    {
+        NSDictionary *gameSettings = self.representedObject.gameSettings;
+        NSUInteger bothButtonsModifierMask = [[gameSettings objectForKey: @"mouseButtonModifierBoth"] unsignedIntegerValue];
+        
+        BOOL isSimulatingBothButtons = (simulatedMouseButtons & BXMouseButtonLeftAndRightMask) == BXMouseButtonLeftAndRightMask;
+        BOOL isPressingBothButtonsShortcut = bothButtonsModifierMask > 0 && ((currentModifiers & bothButtonsModifierMask) == bothButtonsModifierMask);
+        
+        //The user has released the both-buttons shortcut: release whichever mouse button
+        //was previously being simulated, while leaving the original mouse button pressed.
+        if (isSimulatingBothButtons && !isPressingBothButtonsShortcut)
+        {
+            //If the user was pressing the right button originally, release the simulated left button;
+            //otherwise, release the right button.
+            if (rightButtonDown)
+            {
+                [self._emulatedMouse buttonUp: BXMouseButtonLeft];
+                simulatedMouseButtons &= ~BXMouseButtonLeftMask;
+            }
+            else
+            {
+                [self._emulatedMouse buttonUp: BXMouseButtonRight];
+                simulatedMouseButtons &= ~BXMouseButtonRightMask;
+            }
+        }
+        //The user has pressed the both-buttons shortcut: simulate the other mouse button being pressed
+        //along with whichever one was already pressed.
+        else if (!isSimulatingBothButtons && isPressingBothButtonsShortcut)
+        {
+            [self._emulatedMouse buttonDown: BXMouseButtonLeft];
+            [self._emulatedMouse buttonDown: BXMouseButtonRight];
+            
+            simulatedMouseButtons |= BXMouseButtonLeftAndRightMask;
+        }
+    }
+}
+
 - (void) mouseUp: (NSEvent *)theEvent
 {
 	if ([self _controlsCursorWhileMouseInside])
 	{
-		BXEmulatedMouse *mouse = [self _emulatedMouse];
-		
 		if (simulatedMouseButtons != BXNoMouseButtonsMask)
 		{
 			if ((simulatedMouseButtons & BXMouseButtonLeftMask) == BXMouseButtonLeftMask)
-				[mouse buttonUp: BXMouseButtonLeft];
+				[self._emulatedMouse buttonUp: BXMouseButtonLeft];
 			
 			if ((simulatedMouseButtons & BXMouseButtonRightMask) == BXMouseButtonRightMask)
-				[mouse buttonUp: BXMouseButtonRight];
+				[self._emulatedMouse buttonUp: BXMouseButtonRight];
 			
 			if ((simulatedMouseButtons & BXMouseButtonMiddleMask) == BXMouseButtonMiddleMask)
-				[mouse buttonUp: BXMouseButtonMiddle];
+				[self._emulatedMouse buttonUp: BXMouseButtonMiddle];
 			
 			simulatedMouseButtons = BXNoMouseButtonsMask;
 		}
 		//Pass the mouse release as-is to our input handler
-		else [mouse buttonUp: BXMouseButtonLeft];
+		else [self._emulatedMouse buttonUp: BXMouseButtonLeft];
 	}
 	else
 	{
@@ -665,7 +738,23 @@
 {
 	if ([self _controlsCursorWhileMouseInside])
 	{
-		[[self _emulatedMouse] buttonUp: BXMouseButtonRight];
+		if (simulatedMouseButtons != BXNoMouseButtonsMask)
+		{
+			if ((simulatedMouseButtons & BXMouseButtonLeftMask) == BXMouseButtonLeftMask)
+				[self._emulatedMouse buttonUp: BXMouseButtonLeft];
+			
+			if ((simulatedMouseButtons & BXMouseButtonRightMask) == BXMouseButtonRightMask)
+				[self._emulatedMouse buttonUp: BXMouseButtonRight];
+			
+			if ((simulatedMouseButtons & BXMouseButtonMiddleMask) == BXMouseButtonMiddleMask)
+				[self._emulatedMouse buttonUp: BXMouseButtonMiddle];
+			
+			simulatedMouseButtons = BXNoMouseButtonsMask;
+		}
+        else
+        {
+            [self._emulatedMouse buttonUp: BXMouseButtonRight];
+        }
 	}
 	else
 	{
@@ -677,9 +766,9 @@
 - (void) otherMouseUp: (NSEvent *)theEvent
 {
 	//Only pay attention to the middle mouse button; all others can do as they will
-	if ([theEvent buttonNumber] == BXMouseButtonMiddle && [self _controlsCursorWhileMouseInside])
+	if (theEvent.buttonNumber == BXMouseButtonMiddle && [self _controlsCursorWhileMouseInside])
 	{
-		[[self _emulatedMouse] buttonUp: BXMouseButtonMiddle];
+		[self._emulatedMouse buttonUp: BXMouseButtonMiddle];
 	}		
 	else
 	{
@@ -826,7 +915,7 @@
 			if ([touches count] == 0)
 			{	
 				//Unpause when triple-tapping
-				[[self representedObject] resume: self];
+				[self.representedObject resume: self];
 				
 				BXEmulatedMouse *mouse = [self _emulatedMouse];
 			

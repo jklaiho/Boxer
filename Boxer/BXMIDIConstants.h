@@ -11,6 +11,28 @@
 #define BXSysexStart 0xF0
 #define BXSysexEnd 0xF7
 
+//MIDI messages use 7 bits, but must be sent via byte arrays.
+//This mask clears the 8th and higher bits of the byte.
+#define BXMIDIBitmask 0x7F
+
+
+#pragma mark -
+#pragma mark General MIDI sysex message codes
+
+#define BXGeneralMIDISysexNonRealtime 0x7E
+#define BXGeneralMIDISysexRealtime 0x7F
+
+#define BXGeneralMIDISysexAllChannels 0x7F
+#define BXGeneralMIDISysexDeviceControl 0x04
+#define BXGeneralMIDISysexMasterVolume 0x01
+
+#define BXGeneralMIDIMaxMasterVolume 0x3FFF //16383
+
+
+#define BXSysexManufacturerIDRoland 0x41
+#define BXSysexManufacturerIDNonRealtime 0x7E
+#define BXSysexManufacturerIDRealtime 0x7F
+
 
 #pragma mark -
 #pragma mark Roland sysex message format
@@ -27,10 +49,6 @@
 
 #define BXRolandSysexChecksumModulus 128
 
-#define BXSysexManufacturerIDRoland 0x41
-#define BXSysexManufacturerIDNonRealtime 0x7E
-#define BXSysexManufacturerIDRealtime 0x7F
-
 #define BXRolandSysexModelIDMT32 0x16
 #define BXRolandSysexModelIDD50 0x14
 
@@ -41,12 +59,14 @@
 
 #define BXRolandSysexSendMinLength BXRolandSysexHeaderLength + BXRolandSysexAddressLength + BXRolandSysexTailLength
 
-#define BXRolandSysexRequestLength BXRolandSysexHeaderLength + BXRolandSysexAddressLength + BXRolandSysexRequestSizeLength + BXRolandSysexTailLength
+#define BXRolandSysexRequestLength BXRolandSysexSendMinLength + BXRolandSysexRequestSizeLength
 
 #pragma mark -
 #pragma mark MT-32-specific sysex message parameters
 
+#define BXMT32MaxMasterVolume 100
 #define BXMT32LCDMessageLength 20
+
 #define BXMT32SysexAddressPatchMemory 0x05
 #define BXMT32SysexAddressTimbreMemory 0x08
 #define BXMT32SysexAddressSystemArea 0x10
